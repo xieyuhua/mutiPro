@@ -66,6 +66,8 @@ type Runner struct {
 	cfg  *ProgramConfig
 	proc *procHandle
 	log  strings.Builder
+	// logFile 按天把输出写入磁盘；为 nil 时不写文件。
+	logFile *logWriter
 
 	state       RunState
 	stopWanted  bool
@@ -186,9 +188,45 @@ func (r *Runner) appendLog(line string) {
 		trimLogByLines(&r.log)
 	}
 	callback := r.OnLog
+	writer := r.logFile
 	r.mu.Unlock()
+
+	// 文件写入放在锁外，避免慢磁盘拖住状态查询和界面刷新。
+	if writer != nil {
+		writer.Write(line)
+	}
 	if callback != nil {
 		callback(r, line)
+	}
+}
+
+// SetLogFile 启停日志文件写入。运行中切换会立即生效。
+func (r *Runner) SetLogFile(enabled bool, keepDays int) {
+	r.mu.Lock()
+	old := r.logFile
+	r.mu.Unlock()
+
+	if old != nil {
+		old.Close()
+	}
+	var writer *logWriter
+	if enabled {
+		writer = newLogWriter(r.Config().Name, keepDays, true)
+	}
+
+	r.mu.Lock()
+	r.logFile = writer
+	r.mu.Unlock()
+}
+
+// CloseLogFile 关闭日志文件句柄（退出时调用）。
+func (r *Runner) CloseLogFile() {
+	r.mu.Lock()
+	writer := r.logFile
+	r.logFile = nil
+	r.mu.Unlock()
+	if writer != nil {
+		writer.Close()
 	}
 }
 
@@ -302,8 +340,8 @@ func startNormal(r *Runner, exePath, commandLine, workDir string) (*procHandle, 
 		// 传原始命令行，保留用户写的引号，避免二次转义。
 		CmdLine: commandLine,
 	}
-	cmd.Stdout = &logWriter{runner: r}
-	cmd.Stderr = &logWriter{runner: r}
+	cmd.Stdout = &processOutput{runner: r}
+	cmd.Stderr = &processOutput{runner: r}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -780,10 +818,10 @@ func (r *Runner) runDetachedOutput(cfg *ProgramConfig, args string, timeoutMs in
 
 // ---------------------------------------------------------------- 进程辅助
 
-// logWriter 把子进程输出按行转成日志事件。
-type logWriter struct{ runner *Runner }
+// processOutput 把子进程输出按行转成日志事件。
+type processOutput struct{ runner *Runner }
 
-func (w *logWriter) Write(p []byte) (int, error) {
+func (w *processOutput) Write(p []byte) (int, error) {
 	for _, line := range strings.Split(string(p), "\n") {
 		w.runner.appendLog(strings.TrimRight(line, "\r"))
 	}

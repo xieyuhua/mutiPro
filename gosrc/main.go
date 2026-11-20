@@ -199,6 +199,16 @@ type mainWindow struct {
 	actionAutoStart *walk.Action
 	actionMinimize  *walk.Action
 
+	actionCrashNotify  *walk.Action
+	actionCrashSound   *walk.Action
+	actionCrashBalloon *walk.Action
+
+	actionLogToFile        *walk.Action
+	actionLogKeep7         *walk.Action
+	actionLogKeep30        *walk.Action
+	actionLogKeep90        *walk.Action
+	actionLogKeepForever   *walk.Action
+
 	tray       *walk.NotifyIcon
 	trayShow   *walk.Action
 	trayStart  *walk.Action
@@ -213,6 +223,8 @@ type mainWindow struct {
 	trayHintShown bool
 	// windowSaveTimer 用于合并窗口位置变化后的写盘操作。
 	windowSaveTimer *time.Timer
+	// crashNotifiedAt 记录每个程序上次崩溃提醒的时间，用于冷却。
+	crashNotifiedAt map[string]time.Time
 }
 
 func main() {
@@ -238,6 +250,12 @@ func main() {
 	defer releaseSingleInstance()
 
 	w := &mainWindow{app: loadConfig()}
+	// 旧版本配置缺少新字段时 loadConfig 会补上默认值。
+	// 立刻回写一次，让磁盘内容与内存一致，避免「菜单已勾选但
+	// 配置文件里没有该字段」的困惑。
+	if err := w.app.save(); err != nil {
+		crashLog("回写配置失败：%v", err)
+	}
 	if err := w.buildUI(); err != nil {
 		crashLog("buildUI: %v", err)
 		walk.MsgBox(nil, "启动失败", err.Error(), walk.MsgBoxIconError)
@@ -580,7 +598,16 @@ func (w *mainWindow) makeRunner(cfg *ProgramConfig) *Runner {
 	r.OnCrashed = func(runner *Runner, code int) {
 		w.uiAsync(func() { w.onRunnerCrash(runner, code) })
 	}
+	// 按天写日志文件。关闭时不创建目录，也不占文件句柄。
+	r.SetLogFile(w.app.LogToFile, w.app.LogKeepDays)
 	return r
+}
+
+// refreshLogWriters 在日志设置变化后重启所有 Runner 的文件写入。
+func (w *mainWindow) refreshLogWriters() {
+	for _, r := range w.runners {
+		r.SetLogFile(w.app.LogToFile, w.app.LogKeepDays)
+	}
 }
 
 // buildRunners 全量重建。只在启动时使用；编辑/新增/删除必须走增量方法，
@@ -699,12 +726,41 @@ func (w *mainWindow) appendLogLine(line string) {
 	}
 }
 
+// onRunnerCrash 处理异常退出：写日志并按配置播放提示音 / 弹气泡。
+//
+// 单个程序崩溃本身由 Runner 的重启逻辑处理；这里只负责提醒用户。
 func (w *mainWindow) onRunnerCrash(r *Runner, code int) {
 	if r == w.current {
 		w.appendLogLine(fmt.Sprintf("=== 检测到异常退出（退出码 %d），已安排重启", code))
 	}
-	if w.tray != nil && !w.mw.Visible() {
-		_ = w.tray.ShowWarning(r.Config().Name, "程序已退出，正在自动重启")
+	w.notifyCrash(r, code)
+}
+
+// notifyCrash 按配置发出崩溃提醒。
+// 同一程序在冷却期内只提醒一次，避免反复崩溃时疯狂弹窗和响铃。
+func (w *mainWindow) notifyCrash(r *Runner, code int) {
+	cfg := r.Config()
+	if !w.app.CrashNotify {
+		return
+	}
+	// 冷却检查：按程序 ID 分别计时。
+	now := time.Now()
+	if last, ok := w.crashNotifiedAt[cfg.ID]; ok && now.Sub(last) < w.app.crashCooldown() {
+		return
+	}
+	if w.crashNotifiedAt == nil {
+		w.crashNotifiedAt = map[string]time.Time{}
+	}
+	w.crashNotifiedAt[cfg.ID] = now
+
+	if w.app.CrashSound {
+		beepWarning()
+	}
+	if w.app.CrashBalloon && w.tray != nil {
+		// 窗口在前台时也提示：用户可能正看着界面，却不知道后台程序挂了。
+		title := "程序异常退出：" + cfg.Name
+		message := fmt.Sprintf("退出码 %d，已安排自动重启。", code)
+		_ = w.tray.ShowWarning(title, message)
 	}
 }
 
@@ -1189,6 +1245,15 @@ func (w *mainWindow) buildMenuItems() []dcl.MenuItem {
 					},
 				},
 				dcl.Separator{},
+				dcl.Menu{
+					Text:  "崩溃提醒",
+					Items: w.buildCrashNotifyItems(),
+				},
+				dcl.Menu{
+					Text:  "日志文件",
+					Items: w.buildLogFileItems(),
+				},
+				dcl.Separator{},
 				dcl.Action{
 					Text:        "打开配置目录",
 					OnTriggered: func() { openConfigFolder() },
@@ -1347,6 +1412,7 @@ func (w *mainWindow) exitApplication() {
 
 	for _, r := range w.runners {
 		r.Kill()
+		r.CloseLogFile()
 	}
 	if w.tray != nil {
 		_ = w.tray.SetVisible(false)
@@ -1388,6 +1454,7 @@ func (w *mainWindow) onClosing(canceled *bool) {
 	saveWindowState(w.mw)
 	for _, r := range w.runners {
 		r.Kill()
+		r.CloseLogFile()
 	}
 }
 
@@ -1491,6 +1558,8 @@ func (w *mainWindow) requestProbe(r *Runner) {
 func (w *mainWindow) applyAutoStartFromConfig() {
 	_ = applyAutoStart(w.app.AutoStartManager)
 	w.syncMenuChecks()
+	w.syncCrashMenu()
+	w.syncLogMenu()
 }
 
 // toggleAutoStart 由菜单项触发。菜单是勾选式的，状态即当前值。
@@ -1553,4 +1622,189 @@ func (w *mainWindow) scheduleWindowStateSave() {
 	w.windowSaveTimer = time.AfterFunc(800*time.Millisecond, func() {
 		w.uiAsync(func() { saveWindowState(w.mw) })
 	})
+}
+
+// buildCrashNotifyItems 构建「崩溃提醒」子菜单。
+//
+// 默认开启：程序挂了没人知道是最常见的运维问题。
+// 高频重启的程序容易刷屏，所以提供总开关与独立的声音/气泡选项。
+func (w *mainWindow) buildCrashNotifyItems() []dcl.MenuItem {
+	return []dcl.MenuItem{
+		dcl.Action{
+			AssignTo:  &w.actionCrashNotify,
+			Text:      "启用崩溃提醒",
+			Checkable: true,
+			Checked:   w.app.CrashNotify,
+			OnTriggered: func() {
+				w.setCrashNotify(w.actionCrashNotify.Checked())
+			},
+		},
+		dcl.Separator{},
+		dcl.Action{
+			AssignTo:  &w.actionCrashSound,
+			Text:      "播放提示音",
+			Checkable: true,
+			Checked:   w.app.CrashSound,
+			OnTriggered: func() {
+				w.app.CrashSound = w.actionCrashSound.Checked()
+				w.saveConfig()
+				w.syncCrashMenu()
+			},
+		},
+		dcl.Action{
+			AssignTo:  &w.actionCrashBalloon,
+			Text:      "弹出托盘气泡",
+			Checkable: true,
+			Checked:   w.app.CrashBalloon,
+			OnTriggered: func() {
+				w.app.CrashBalloon = w.actionCrashBalloon.Checked()
+				w.saveConfig()
+				w.syncCrashMenu()
+			},
+		},
+		dcl.Separator{},
+		dcl.Action{
+			Text:        "测试提醒效果",
+			OnTriggered: func() { w.testCrashNotify() },
+		},
+	}
+}
+
+// setCrashNotify 开关崩溃提醒。关闭时会同时禁用子项，避免误操作。
+func (w *mainWindow) setCrashNotify(enabled bool) {
+	w.app.CrashNotify = enabled
+	w.saveConfig()
+	w.syncCrashMenu()
+}
+
+// syncCrashMenu 让菜单勾选状态与实际配置一致。
+func (w *mainWindow) syncCrashMenu() {
+	if w.actionCrashNotify != nil {
+		_ = w.actionCrashNotify.SetChecked(w.app.CrashNotify)
+	}
+	if w.actionCrashSound != nil {
+		_ = w.actionCrashSound.SetChecked(w.app.CrashSound)
+		_ = w.actionCrashSound.SetEnabled(w.app.CrashNotify)
+	}
+	if w.actionCrashBalloon != nil {
+		_ = w.actionCrashBalloon.SetChecked(w.app.CrashBalloon)
+		_ = w.actionCrashBalloon.SetEnabled(w.app.CrashNotify)
+	}
+}
+
+// testCrashNotify 立即触发一次提醒，方便确认声音和气泡是否正常。
+func (w *mainWindow) testCrashNotify() {
+	if !w.app.CrashNotify {
+		walk.MsgBox(w.mw, "崩溃提醒已关闭",
+			"请先勾选「启用崩溃提醒」。", walk.MsgBoxIconInformation)
+		return
+	}
+	if w.app.CrashSound {
+		beepWarning()
+	}
+	if w.app.CrashBalloon && w.tray != nil {
+		_ = w.tray.ShowWarning("测试提醒",
+			"这是崩溃提醒的示例效果。程序异常退出时会这样提示。")
+	}
+	if !w.app.CrashSound && !w.app.CrashBalloon {
+		walk.MsgBox(w.mw, "没有可用的提醒方式",
+			"提示音和气泡都已关闭。", walk.MsgBoxIconInformation)
+	}
+}
+
+// buildLogFileItems 构建「日志文件」子菜单。
+//
+// 日志按天分割写入独立文件，方便事后排查；保留天数可调，
+// 避免长期运行把磁盘占满。
+func (w *mainWindow) buildLogFileItems() []dcl.MenuItem {
+	return []dcl.MenuItem{
+		dcl.Action{
+			AssignTo:  &w.actionLogToFile,
+			Text:      "写入日志文件（按天分割）",
+			Checkable: true,
+			Checked:   w.app.LogToFile,
+			OnTriggered: func() {
+				w.app.LogToFile = w.actionLogToFile.Checked()
+				w.saveConfig()
+				w.refreshLogWriters()
+				w.syncLogMenu()
+			},
+		},
+		dcl.Separator{},
+		dcl.Action{
+			AssignTo:    &w.actionLogKeep7,
+			Text:        "保留 7 天",
+			Checkable:   true,
+			Checked:     w.app.LogKeepDays == 7,
+			OnTriggered: func() { w.setLogKeepDays(7) },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionLogKeep30,
+			Text:        "保留 30 天",
+			Checkable:   true,
+			Checked:     w.app.LogKeepDays == 30,
+			OnTriggered: func() { w.setLogKeepDays(30) },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionLogKeep90,
+			Text:        "保留 90 天",
+			Checkable:   true,
+			Checked:     w.app.LogKeepDays == 90,
+			OnTriggered: func() { w.setLogKeepDays(90) },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionLogKeepForever,
+			Text:        "永久保留",
+			Checkable:   true,
+			Checked:     w.app.LogKeepDays == 0,
+			OnTriggered: func() { w.setLogKeepDays(0) },
+		},
+		dcl.Separator{},
+		dcl.Action{
+			Text:        "打开日志目录",
+			OnTriggered: func() { openLogFolder() },
+		},
+	}
+}
+
+// setLogKeepDays 更新保留天数并立即清理过期文件。
+func (w *mainWindow) setLogKeepDays(days int) {
+	w.app.LogKeepDays = days
+	w.saveConfig()
+	w.refreshLogWriters()
+	w.syncLogMenu()
+}
+
+// syncLogMenu 让日志菜单的勾选状态与配置一致。
+func (w *mainWindow) syncLogMenu() {
+	if w.actionLogToFile != nil {
+		_ = w.actionLogToFile.SetChecked(w.app.LogToFile)
+	}
+	enabled := w.app.LogToFile
+	pairs := []struct {
+		action *walk.Action
+		days   int
+	}{
+		{w.actionLogKeep7, 7},
+		{w.actionLogKeep30, 30},
+		{w.actionLogKeep90, 90},
+		{w.actionLogKeepForever, 0},
+	}
+	for _, pair := range pairs {
+		if pair.action == nil {
+			continue
+		}
+		_ = pair.action.SetChecked(w.app.LogKeepDays == pair.days)
+		_ = pair.action.SetEnabled(enabled)
+	}
+}
+
+// openLogFolder 在资源管理器中打开日志根目录。
+func openLogFolder() {
+	dir, err := logDir()
+	if err != nil {
+		return
+	}
+	_ = os.MkdirAll(dir, 0o755)
+	_ = execCommand("explorer.exe", dir)
 }

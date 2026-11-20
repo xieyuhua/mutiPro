@@ -92,6 +92,57 @@ type AppConfig struct {
 	AutoStartManager bool             `json:"autoStartManager"`
 	MinimizeToTray   bool             `json:"minimizeToTray"`
 	ShowTrayHint     bool             `json:"showTrayHint"`
+
+	// 崩溃通知。程序异常退出并触发自动重启时提醒用户。
+	CrashNotify bool `json:"crashNotify"`
+	// CrashSound 为 true 时播放系统提示音。
+	CrashSound bool `json:"crashSound"`
+	// CrashBalloon 为 true 时弹托盘气泡；窗口在前台时也弹，
+	// 避免用户盯着界面却不知道后台程序挂了。
+	CrashBalloon bool `json:"crashBalloon"`
+	// CrashNotifyCooldownSec 同一程序的提醒最小间隔，防止疯狂重启时刷屏。
+	CrashNotifyCooldownSec int `json:"crashNotifyCooldownSec"`
+	// CrashNotifyInitialized 标记崩溃提醒相关字段是否已初始化过。
+	//
+	// JSON 里缺失的 bool 会解析成 false，无法区分「用户主动关闭」和
+	// 「旧版本没这个字段」。旧版本写下的配置没有本字段（false），
+	// 此时填入默认值；之后用户如何设置都会被保留。
+	CrashNotifyInitialized bool `json:"crashNotifyInitialized"`
+
+	// 日志文件。按天分割写入 %APPDATA%\MultiPro\logs\<程序名>\YYYY-MM-DD.log
+	LogToFile bool `json:"logToFile"`
+	// LogKeepDays 保留最近多少天的日志，超出自动删除。0 表示不清理。
+	LogKeepDays int `json:"logKeepDays"`
+	// LogFileInitialized 与 CrashNotifyInitialized 同理，用于区分
+	// 「用户主动关闭」和「旧配置没有这个字段」。
+	LogFileInitialized bool `json:"logFileInitialized"`
+}
+
+// applyDefaults 为缺失的字段补上默认值。
+// 只处理「没有历史值」的情况，不覆盖用户已有的选择。
+func (c *AppConfig) applyDefaults() {
+	if !c.CrashNotifyInitialized {
+		c.CrashNotify = true
+		c.CrashSound = true
+		c.CrashBalloon = true
+		c.CrashNotifyInitialized = true
+	}
+	if c.CrashNotifyCooldownSec <= 0 {
+		c.CrashNotifyCooldownSec = 60
+	}
+	if !c.LogFileInitialized {
+		c.LogToFile = true
+		// 首次启用时给一个合理的保留期。
+		// 注意：0 在配置里有明确含义（永久保留），所以默认值只能
+		// 放在这个分支里；若放在外面判断 0 就会被用户的选择覆盖掉。
+		if c.LogKeepDays <= 0 {
+			c.LogKeepDays = 30
+		}
+		c.LogFileInitialized = true
+	}
+	if c.LogKeepDays < 0 {
+		c.LogKeepDays = 30
+	}
 }
 
 func newProgramConfig() *ProgramConfig {
@@ -111,7 +162,26 @@ func defaultAppConfig() *AppConfig {
 		Programs:       []*ProgramConfig{},
 		MinimizeToTray: true,
 		ShowTrayHint:   true,
+
+		CrashNotify:            true,
+		CrashSound:             true,
+		CrashBalloon:           true,
+		CrashNotifyCooldownSec: 60,
+		CrashNotifyInitialized: true,
+
+		LogToFile:          true,
+		LogKeepDays:        30,
+		LogFileInitialized: true,
 	}
+}
+
+// crashCooldown 返回崩溃提醒的最小间隔。
+func (c *AppConfig) crashCooldown() time.Duration {
+	seconds := c.CrashNotifyCooldownSec
+	if seconds <= 0 {
+		seconds = 60
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 // ---------------------------------------------------------------- 配置目录
@@ -172,6 +242,7 @@ func readConfigFile(path string) (*AppConfig, bool) {
 	for _, p := range cfg.Programs {
 		normalizeProgram(p)
 	}
+	cfg.applyDefaults()
 	return &cfg, true
 }
 

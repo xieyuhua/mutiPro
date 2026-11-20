@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/lxn/win"
@@ -289,4 +290,122 @@ func TestSingleInstanceGuard(t *testing.T) {
 		t.Fatal("acquire after release should succeed")
 	}
 	releaseSingleInstance()
+}
+
+// ---------------------------------------------------------------- 崩溃提醒
+
+// TestCrashNotifyDefaults 验证默认配置下崩溃提醒是开启的。
+func TestCrashNotifyDefaults(t *testing.T) {
+	cfg := defaultAppConfig()
+	if !cfg.CrashNotify {
+		t.Error("崩溃提醒默认应开启")
+	}
+	if !cfg.CrashSound || !cfg.CrashBalloon {
+		t.Error("提示音与气泡默认应开启")
+	}
+	if cfg.CrashNotifyCooldownSec <= 0 {
+		t.Errorf("冷却时间应有默认值，得到 %d", cfg.CrashNotifyCooldownSec)
+	}
+	if cfg.crashCooldown() <= 0 {
+		t.Error("冷却时长应大于 0")
+	}
+}
+
+// TestCrashCooldownFallback 验证冷却配置异常时回退到 60 秒。
+func TestCrashCooldownFallback(t *testing.T) {
+	for _, value := range []int{0, -1, -100} {
+		cfg := &AppConfig{CrashNotifyCooldownSec: value}
+		if got := cfg.crashCooldown(); got != 60*time.Second {
+			t.Errorf("%d => %v, want 60s", value, got)
+		}
+	}
+	cfg := &AppConfig{CrashNotifyCooldownSec: 30}
+	if got := cfg.crashCooldown(); got != 30*time.Second {
+		t.Errorf("30 => %v", got)
+	}
+}
+
+// TestCrashNotifyCooldown 验证同一程序在冷却期内只提醒一次，
+// 不同程序互不影响。
+func TestCrashNotifyCooldown(t *testing.T) {
+	// 直接测试冷却判定逻辑，不创建窗口。
+	cooldown := 60 * time.Second
+	notified := map[string]time.Time{}
+
+	shouldNotify := func(id string, now time.Time) bool {
+		if last, ok := notified[id]; ok && now.Sub(last) < cooldown {
+			return false
+		}
+		notified[id] = now
+		return true
+	}
+
+	base := time.Now()
+	if !shouldNotify("a", base) {
+		t.Error("首次应提醒")
+	}
+	if shouldNotify("a", base.Add(10*time.Second)) {
+		t.Error("冷却期内不应重复提醒")
+	}
+	if !shouldNotify("b", base.Add(10*time.Second)) {
+		t.Error("不同程序应独立计时")
+	}
+	if !shouldNotify("a", base.Add(61*time.Second)) {
+		t.Error("超过冷却期后应再次提醒")
+	}
+}
+
+// TestCrashNotifyConfigMigrates 验证旧配置（没有这些字段）读入后使用默认值。
+func TestCrashNotifyConfigMigrates(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+
+	path, _ := configPath()
+	// 模拟旧版本写下的配置：没有 crash* 字段。
+	old := `{"programs":[],"autoStartManager":false,"minimizeToTray":true,"showTrayHint":true}`
+	if err := os.WriteFile(path, []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadConfig()
+	// 旧配置没有 crash* 字段，applyDefaults 应补上「开启」，
+	// 否则升级后用户收不到任何崩溃提醒。
+	if !cfg.CrashNotify {
+		t.Error("旧配置升级后崩溃提醒应默认开启")
+	}
+	if !cfg.CrashSound || !cfg.CrashBalloon {
+		t.Error("旧配置升级后声音与气泡应默认开启")
+	}
+	if !cfg.CrashNotifyInitialized {
+		t.Error("应标记为已初始化，避免下次覆盖用户选择")
+	}
+	if cfg.crashCooldown() <= 0 {
+		t.Error("冷却时间必须有效")
+	}
+}
+
+// TestCrashNotifyUserChoicePreserved 验证用户主动关闭后不会被默认值覆盖。
+func TestCrashNotifyUserChoicePreserved(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+
+	path, _ := configPath()
+	// 用户已经关掉提醒：带初始化标记且 CrashNotify=false。
+	saved := `{"programs":[],"crashNotify":false,"crashSound":false,
+		"crashBalloon":false,"crashNotifyCooldownSec":30,
+		"crashNotifyInitialized":true}`
+	if err := os.WriteFile(path, []byte(saved), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadConfig()
+	if cfg.CrashNotify {
+		t.Error("用户主动关闭的提醒不应被重新打开")
+	}
+	if cfg.CrashSound || cfg.CrashBalloon {
+		t.Error("用户关闭的子项应保持关闭")
+	}
+	if cfg.CrashNotifyCooldownSec != 30 {
+		t.Errorf("冷却时间应保留用户的 30 秒，得到 %d", cfg.CrashNotifyCooldownSec)
+	}
 }

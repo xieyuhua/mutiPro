@@ -569,3 +569,14 @@ func validWindowState(state *windowState) bool {
 	}
 	return true
 }
+
+// ---------------------------------------------------------------- 崩溃通知
+
+// beepWarning 播放系统「警告」提示音。
+//
+// 用 MessageBeep 而不是嵌入音频文件：它遵循用户在「声音」控制面板
+// 里的设置，静音或改过提示音时行为一致，也不会因为缺少 wav 文件
+// 而失败。
+func beepWarning() {
+	win.MessageBeep(win.MB_ICONWARNING)
+}
