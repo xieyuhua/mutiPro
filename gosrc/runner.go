@@ -78,6 +78,10 @@ type Runner struct {
 	// 定时任务上次触发的时刻，避免同一分钟内重复触发。
 	lastSchedStart time.Time
 	lastSchedStop  time.Time
+	// 定时规则解析结果缓存，配置变化时通过 schedCacheKey 失效。
+	startSched   *Schedule
+	stopSched    *Schedule
+	schedCacheKey string
 
 	OnStateChanged func(*Runner)
 	OnLog          func(*Runner, string)
@@ -591,14 +595,16 @@ func (r *Runner) CheckSchedule(now time.Time) DueAction {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cfg := r.cfg
+	startSched, stopSched := r.schedulesLocked(cfg)
 
-	if cfg.ScheduleStop != "" && scheduleDue(now, cfg.ScheduleStop, r.lastSchedStop) {
+	if stopSched.Due(now, r.lastSchedStop) {
 		r.lastSchedStop = now
 		if r.proc != nil {
 			return ActionStop
 		}
 	}
-	if cfg.ScheduleStart != "" && scheduleDue(now, cfg.ScheduleStart, r.lastSchedStart) {
+
+	if startSched.Due(now, r.lastSchedStart) {
 		r.lastSchedStart = now
 		if r.proc == nil {
 			return ActionStart
@@ -616,15 +622,46 @@ func (r *Runner) CheckSchedule(now time.Time) DueAction {
 	return ActionNone
 }
 
+// schedulesLocked 按需解析并缓存定时规则。调用方需持有 r.mu。
+// 非法表达式会被忽略，避免配置错误让调度器崩溃。
+func (r *Runner) schedulesLocked(cfg *ProgramConfig) (start, stop *Schedule) {
+	key := cfg.ScheduleStart + "\x00" + cfg.ScheduleStop
+	if key == r.schedCacheKey {
+		return r.startSched, r.stopSched
+	}
+	r.startSched = parseScheduleQuiet(cfg.ScheduleStart)
+	r.stopSched = parseScheduleQuiet(cfg.ScheduleStop)
+	r.schedCacheKey = key
+	return r.startSched, r.stopSched
+}
+
+// parseScheduleQuiet 解析定时表达式，失败时返回 nil（不启用）。
+func parseScheduleQuiet(text string) *Schedule {
+	sched, err := ParseSchedule(text)
+	if err != nil {
+		return nil
+	}
+	return sched
+}
+
+// cronDue 判断当前分钟是否满足 cron 且本分钟尚未触发过。
+func cronDue(now time.Time, spec *CronSpec, lastFired time.Time) bool {
+	if !spec.Matches(now) {
+		return false
+	}
+	return lastFired.Year() != now.Year() || lastFired.YearDay() != now.YearDay() ||
+		lastFired.Hour() != now.Hour() || lastFired.Minute() != now.Minute()
+}
+
 // ScheduleSummary 返回界面展示用的调度说明。
 func (r *Runner) ScheduleSummary() string {
 	cfg := r.Config()
 	var parts []string
-	if cfg.ScheduleStart != "" {
-		parts = append(parts, "启动 "+cfg.ScheduleStart)
+	if sched := parseScheduleQuiet(cfg.ScheduleStart); sched != nil {
+		parts = append(parts, "启动 "+sched.Display())
 	}
-	if cfg.ScheduleStop != "" {
-		parts = append(parts, "停止 "+cfg.ScheduleStop)
+	if sched := parseScheduleQuiet(cfg.ScheduleStop); sched != nil {
+		parts = append(parts, "停止 "+sched.Display())
 	}
 	if cfg.RestartEveryMin > 0 {
 		parts = append(parts, fmt.Sprintf("每 %d 分钟重启", cfg.RestartEveryMin))

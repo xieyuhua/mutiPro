@@ -48,11 +48,20 @@ type ProgramConfig struct {
 	// Interpreter 可选，自定义解释器路径；留空则从 PATH 查找。
 	Interpreter string `json:"interpreter"`
 
-	// ScheduleStart / ScheduleStop 为每天定时启动、停止时间，格式 HH:MM；
+	// ScheduleStart / ScheduleStop 同时接受两种写法，自动识别：
+	//
+	//	"08:30"       每天 08:30
+	//	"0 8 * * 1-5" cron 表达式
+	//
 	// 留空表示不启用。RestartEveryMin 为周期性重启间隔（分钟），0 表示关闭。
 	ScheduleStart   string `json:"scheduleStart"`
 	ScheduleStop    string `json:"scheduleStop"`
 	RestartEveryMin int    `json:"restartEveryMin"`
+
+	// 以下两个字段是旧版本遗留（简单时间与 cron 分开存）。
+	// 仅用于读取旧配置时迁移，保存时不再写入。
+	CronStart string `json:"cronStart,omitempty"`
+	CronStop  string `json:"cronStop,omitempty"`
 }
 
 // 脚本执行方式。
@@ -172,6 +181,16 @@ func normalizeProgram(p *ProgramConfig) {
 	if p.ScriptMode == "" {
 		p.ScriptMode = ModeAuto
 	}
+	// 迁移旧配置：以前把 HH:MM 和 cron 分成两个字段，cron 优先。
+	// 现在合并成一个字段，cron 若有值就覆盖简单时间，然后清空旧字段。
+	if strings.TrimSpace(p.CronStart) != "" {
+		p.ScheduleStart = p.CronStart
+	}
+	if strings.TrimSpace(p.CronStop) != "" {
+		p.ScheduleStop = p.CronStop
+	}
+	p.CronStart = ""
+	p.CronStop = ""
 }
 
 func (c *AppConfig) save() error {
@@ -589,15 +608,6 @@ func parseClock(value string) (hour, minute int, err error) {
 	return hour, minute, nil
 }
 
-// ValidateClock 校验用户输入，空串视为「未启用」。
-func validateClock(value string) error {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	_, _, err := parseClock(value)
-	return err
-}
-
 // normalizeClock 把 9:5 这类输入规范成 09:05。
 func normalizeClock(value string) string {
 	hour, minute, err := parseClock(value)
@@ -619,4 +629,79 @@ func scheduleDue(now time.Time, clock string, lastFired time.Time) bool {
 	}
 	return lastFired.Hour() != hour || lastFired.Minute() != minute ||
 		lastFired.YearDay() != now.YearDay() || lastFired.Year() != now.Year()
+}
+
+// isClockExpression 判断输入是「每天 HH:MM」还是 cron 表达式。
+// 约定：含空格就是 cron（cron 必须 5 段），否则按 HH:MM 处理。
+func isClockExpression(text string) bool {
+	return !strings.Contains(strings.TrimSpace(text), " ")
+}
+
+// ParseSchedule 解析用户填写的定时表达式，返回统一的调度规则。
+// 支持两种写法，自动识别：
+//
+//	"08:30"      → 每天 08:30
+//	"0 8 * * 1-5" → cron
+//
+// 空字符串返回 (nil, nil) 表示不启用。
+func ParseSchedule(text string) (*Schedule, error) {
+	value := strings.TrimSpace(text)
+	if value == "" {
+		return nil, nil
+	}
+	if isClockExpression(value) {
+		hour, minute, err := parseClock(value)
+		if err != nil {
+			return nil, fmt.Errorf("时间格式应为 HH:MM 或 5 段 cron：%v", err)
+		}
+		return &Schedule{Clock: fmt.Sprintf("%02d:%02d", hour, minute)}, nil
+	}
+	spec, err := ParseCron(value)
+	if err != nil {
+		return nil, fmt.Errorf("cron 表达式无效：%v", err)
+	}
+	return &Schedule{Cron: spec, Raw: value}, nil
+}
+
+// Schedule 表示一条已解析的定时规则，要么是每天固定时刻，要么是 cron。
+type Schedule struct {
+	// Clock 非空时表示每天的这个时刻。
+	Clock string
+	// Cron 非空时按表达式匹配。
+	Cron *CronSpec
+	// Raw 是用户填写的原始文本，用于界面展示。
+	Raw string
+}
+
+// Due 判断当前时刻是否应触发，同一分钟内只触发一次。
+func (s *Schedule) Due(now time.Time, lastFired time.Time) bool {
+	if s == nil {
+		return false
+	}
+	if s.Cron != nil {
+		return cronDue(now, s.Cron, lastFired)
+	}
+	return scheduleDue(now, s.Clock, lastFired)
+}
+
+// Describe 返回中文说明。
+func (s *Schedule) Describe() string {
+	if s == nil {
+		return ""
+	}
+	if s.Cron != nil {
+		return s.Cron.Describe()
+	}
+	return "每天 " + s.Clock
+}
+
+// Display 返回列表里显示的简短文本。
+func (s *Schedule) Display() string {
+	if s == nil {
+		return ""
+	}
+	if s.Cron != nil {
+		return s.Raw
+	}
+	return s.Clock
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -38,8 +39,10 @@ type editDialog struct {
 	txtInterp   *walk.LineEdit
 	lblModeHint *walk.Label
 
+	// 启动/停止各只有一个输入框，内容可以是 HH:MM 或 cron。
 	txtSchedStart *walk.LineEdit
 	txtSchedStop  *walk.LineEdit
+	lblCronHint   *walk.Label
 	numRestartMin *walk.NumberEdit
 
 	accepted bool
@@ -114,17 +117,17 @@ func (d *editDialog) build(owner walk.Form) error {
 		AssignTo: &d.dlg,
 		Title:    "编辑程序",
 		Icon:     appIcon(),
-		MinSize:  dcl.Size{Width: 720, Height: 600},
-		Size:     dcl.Size{Width: 780, Height: 800},
+		MinSize:  dcl.Size{Width: 760, Height: 620},
+		Size:     dcl.Size{Width: 820, Height: 820},
 		Layout:   dcl.VBox{Spacing: 8},
 		Children: []dcl.Widget{
 			dcl.ScrollView{
-				Layout: dcl.VBox{Spacing: 8},
+				Layout: dcl.VBox{Spacing: 6, Alignment: dcl.AlignHNearVNear},
 				Children: []dcl.Widget{
 					// ---- 基本配置 ----
 					dcl.GroupBox{
 						Title:  "基本",
-						Layout: dcl.Grid{Columns: 2, Spacing: 8},
+						Layout: dcl.Grid{Columns: 2, Spacing: 6},
 						Children: []dcl.Widget{
 							dcl.Label{Text: "名称"},
 							dcl.LineEdit{AssignTo: &d.txtName, Text: d.cfg.Name},
@@ -181,10 +184,10 @@ func (d *editDialog) build(owner walk.Form) error {
 					// ---- 脚本执行 ----
 					dcl.GroupBox{
 						Title:  "运行方式（脚本）",
-						Layout: dcl.VBox{Spacing: 6},
+						Layout: dcl.VBox{Spacing: 3, Alignment: dcl.AlignHNearVNear},
 						Children: []dcl.Widget{
 							dcl.Composite{
-								Layout: dcl.Grid{Columns: 2, Spacing: 8},
+								Layout: dcl.Grid{Columns: 2, Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.Label{Text: "执行方式"},
 									dcl.ComboBox{
@@ -212,7 +215,7 @@ func (d *editDialog) build(owner walk.Form) error {
 					// ---- 行为 ----
 					dcl.GroupBox{
 						Title:  "行为",
-						Layout: dcl.VBox{Spacing: 4},
+						Layout: dcl.VBox{Spacing: 3, Alignment: dcl.AlignHNearVNear},
 						Children: []dcl.Widget{
 							dcl.CheckBox{
 								AssignTo: &d.chkAdmin,
@@ -247,24 +250,46 @@ func (d *editDialog) build(owner walk.Form) error {
 					},
 
 					// ---- 定时执行 ----
+					// 每个动作只有一个输入框：填 HH:MM 就是每天执行，
+					// 填 5 段表达式就按 cron 执行，不再提供两个互相覆盖的字段。
 					dcl.GroupBox{
 						Title:  "定时执行",
-						Layout: dcl.VBox{Spacing: 6},
+						Layout: dcl.VBox{Spacing: 3, Alignment: dcl.AlignHNearVNear},
 						Children: []dcl.Widget{
 							dcl.Composite{
-								Layout: dcl.Grid{Columns: 2, Spacing: 8},
+								Layout: dcl.Grid{Columns: 2, Spacing: 6},
 								Children: []dcl.Widget{
-									dcl.Label{Text: "每天启动时间"},
-									dcl.LineEdit{
-										AssignTo:    &d.txtSchedStart,
-										Text:        d.cfg.ScheduleStart,
-										ToolTipText: "格式 HH:MM，例如 08:30；留空表示不启用",
+									dcl.Label{Text: "启动时间"},
+									dcl.Composite{
+										Layout: dcl.HBox{Spacing: 4, MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.LineEdit{
+												AssignTo:      &d.txtSchedStart,
+												StretchFactor: 1,
+												ToolTipText: "HH:MM（每天）或 cron 表达式，例如 08:30 或 0 8 * * 1-5；留空不启用",
+											},
+											dcl.PushButton{
+												Text:      "示例…",
+												MinSize:   dcl.Size{Width: 64},
+												OnClicked: func() { d.pickPreset(true) },
+											},
+										},
 									},
-									dcl.Label{Text: "每天停止时间"},
-									dcl.LineEdit{
-										AssignTo:    &d.txtSchedStop,
-										Text:        d.cfg.ScheduleStop,
-										ToolTipText: "格式 HH:MM，例如 23:00；留空表示不启用",
+									dcl.Label{Text: "停止时间"},
+									dcl.Composite{
+										Layout: dcl.HBox{Spacing: 4, MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.LineEdit{
+												AssignTo:      &d.txtSchedStop,
+												StretchFactor: 1,
+												ToolTipText: "HH:MM（每天）或 cron 表达式，例如 23:00 或 0 23 * * *；留空不启用",
+											},
+											dcl.PushButton{
+												Text:      "示例…",
+												MinSize:   dcl.Size{Width: 64},
+												OnClicked: func() { d.pickPreset(false) },
+											},
+										},
 									},
 									dcl.Label{Text: "周期重启"},
 									dcl.Composite{
@@ -283,13 +308,18 @@ func (d *editDialog) build(owner walk.Form) error {
 									},
 								},
 							},
+							dcl.Label{
+								AssignTo:  &d.lblCronHint,
+								Text:      "",
+								TextColor: walk.RGB(100, 116, 139),
+							},
 						},
 					},
 
 					// ---- 探测 ----
 					dcl.GroupBox{
 						Title:  "状态探测（可选）",
-						Layout: dcl.VBox{Spacing: 6},
+						Layout: dcl.VBox{Spacing: 6, Alignment: dcl.AlignHNearVNear},
 						Children: []dcl.Widget{
 							dcl.CheckBox{
 								AssignTo:         &d.chkProbe,
@@ -298,7 +328,7 @@ func (d *editDialog) build(owner walk.Form) error {
 								OnCheckedChanged: func() { d.updateProbeEnabled() },
 							},
 							dcl.Composite{
-								Layout: dcl.Grid{Columns: 2, Spacing: 8},
+								Layout: dcl.Grid{Columns: 2, Spacing: 6},
 								Children: []dcl.Widget{
 									dcl.Label{Text: "查询命令"},
 									dcl.LineEdit{
@@ -367,6 +397,77 @@ func (d *editDialog) initAfterCreate() {
 	}
 	d.cmbMode.CurrentIndexChanged().Attach(func() { d.updateModeHint() })
 	d.updateModeHint()
+
+	d.txtSchedStart.TextChanged().Attach(func() { d.updateCronHint() })
+	d.txtSchedStop.TextChanged().Attach(func() { d.updateCronHint() })
+	d.updateCronHint()
+}
+
+// updateCronHint 实时解释 cron 表达式，填错能立刻看到原因。
+func (d *editDialog) updateCronHint() {
+	if d.lblCronHint == nil {
+		return
+	}
+	var notes []string
+	for _, pair := range []struct {
+		label string
+		text  string
+	}{
+		{"启动", d.txtSchedStart.Text()},
+		{"停止", d.txtSchedStop.Text()},
+	} {
+		text := strings.TrimSpace(pair.text)
+		if text == "" {
+			continue
+		}
+		desc, err := describeSchedule(text)
+		if err != nil {
+			notes = append(notes, pair.label+"无效："+err.Error())
+			continue
+		}
+		notes = append(notes, pair.label+" "+desc)
+	}
+	if len(notes) == 0 {
+		_ = d.lblCronHint.SetText("留空表示不启用。可填 HH:MM（每天）或 cron 表达式，" +
+			"点「示例…」挑选常用规则。")
+		return
+	}
+	_ = d.lblCronHint.SetText(strings.Join(notes, "　|　"))
+}
+
+// describeSchedule 把用户输入解释成中文，用于实时提示。
+func describeSchedule(text string) (string, error) {
+	if isClockExpression(text) {
+		hour, minute, err := parseClock(text)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("每天 %02d:%02d", hour, minute), nil
+	}
+	spec, err := ParseCron(text)
+	if err != nil {
+		return "", err
+	}
+	return "cron：" + spec.Describe(), nil
+}
+
+// pickPreset 打开示例列表，选中后填入对应的 cron 输入框。
+func (d *editDialog) pickPreset(forStart bool) {
+	target := "停止"
+	if forStart {
+		target = "启动"
+	}
+	index, ok := showCronPresetDialog(d.dlg, target)
+	if !ok || index < 0 || index >= len(cronPresets) {
+		return
+	}
+	entry := cronPresets[index]
+	if forStart {
+		_ = d.txtSchedStart.SetText(entry.Expr)
+	} else {
+		_ = d.txtSchedStop.SetText(entry.Expr)
+	}
+	d.updateCronHint()
 }
 
 func parserIndex(parser string) int {
@@ -484,14 +585,15 @@ func (d *editDialog) confirm() {
 			walk.MsgBoxIconWarning)
 		return
 	}
-	if err := validateClock(d.txtSchedStart.Text()); err != nil {
-		walk.MsgBox(d.dlg, "配置无效", "启动时间格式不正确："+err.Error()+
-			"\n应为 HH:MM，例如 08:30", walk.MsgBoxIconWarning)
+	// 启动/停止各只有一个输入框，这里按内容类型统一校验。
+	if _, err := ParseSchedule(d.txtSchedStart.Text()); err != nil {
+		walk.MsgBox(d.dlg, "配置无效", "启动时间填写有误："+err.Error()+
+			"\n可填 08:30（每天）或 0 8 * * 1-5（cron）", walk.MsgBoxIconWarning)
 		return
 	}
-	if err := validateClock(d.txtSchedStop.Text()); err != nil {
-		walk.MsgBox(d.dlg, "配置无效", "停止时间格式不正确："+err.Error()+
-			"\n应为 HH:MM，例如 23:00", walk.MsgBoxIconWarning)
+	if _, err := ParseSchedule(d.txtSchedStop.Text()); err != nil {
+		walk.MsgBox(d.dlg, "配置无效", "停止时间填写有误："+err.Error()+
+			"\n可填 23:00（每天）或 0 23 * * *（cron）", walk.MsgBoxIconWarning)
 		return
 	}
 	d.collect()
@@ -522,8 +624,22 @@ func (d *editDialog) collect() {
 	d.cfg.ScriptMode = modeValue(d.cmbMode.CurrentIndex())
 	d.cfg.Interpreter = strings.TrimSpace(d.txtInterp.Text())
 
-	// 时间统一规范成 HH:MM，空值保持为空表示不启用。
-	d.cfg.ScheduleStart = normalizeClock(d.txtSchedStart.Text())
-	d.cfg.ScheduleStop = normalizeClock(d.txtSchedStop.Text())
+	// 统一格式：HH:MM 规范成两位数，cron 原样保留（压缩多余空格）。
+	d.cfg.ScheduleStart = normalizeScheduleText(d.txtSchedStart.Text())
+	d.cfg.ScheduleStop = normalizeScheduleText(d.txtSchedStop.Text())
+	d.cfg.CronStart = ""
+	d.cfg.CronStop = ""
 	d.cfg.RestartEveryMin = int(d.numRestartMin.Value())
+}
+
+// normalizeScheduleText 规范用户输入：HH:MM 补齐两位，cron 用单空格。
+func normalizeScheduleText(text string) string {
+	value := strings.TrimSpace(text)
+	if value == "" {
+		return ""
+	}
+	if isClockExpression(value) {
+		return normalizeClock(value)
+	}
+	return strings.Join(strings.Fields(value), " ")
 }

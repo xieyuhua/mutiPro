@@ -13,6 +13,7 @@ import (
 
 	"github.com/lxn/walk"
 	dcl "github.com/lxn/walk/declarative"
+	"github.com/lxn/win"
 )
 
 // crashLog 把启动期错误写入文件，避免 GUI 程序闪退后无从排查。
@@ -131,26 +132,34 @@ type mainWindow struct {
 	app *AppConfig
 
 	// 窗口与控件
-	mw        *walk.MainWindow
-	table     *walk.TableView
-	btnStart  *walk.PushButton
-	btnStop   *walk.PushButton
-	btnRestart *walk.PushButton
-	btnEdit   *walk.PushButton
-	btnRemove *walk.PushButton
+	mw    *walk.MainWindow
+	table *walk.TableView
+
+	// 菜单动作。
+	actionAdd     *walk.Action
+	actionEdit    *walk.Action
+	actionRemove  *walk.Action
+	actionStart   *walk.Action
+	actionStop    *walk.Action
+	actionRestart *walk.Action
 
 	lblTitle       *walk.Label
 	lblState       *walk.Label
 	lblInfo        *walk.Label
 	lblMeta        *walk.Label
 	probeContainer *walk.Composite
+	lblProbeHint   *walk.Label
 	logEdit        *walk.TextEdit
 	btnClearLog    *walk.PushButton
+	tabs           *walk.TabWidget
+	statusPage     *walk.TabPage
 
-	chkAutoStart *walk.CheckBox
-	chkMinimize  *walk.CheckBox
 	lblAdmin     *walk.Label
 	lblStatusBar *walk.Label
+
+	// 菜单动作：勾选状态需要与配置同步。
+	actionAutoStart *walk.Action
+	actionMinimize  *walk.Action
 
 	tray       *walk.NotifyIcon
 	trayShow   *walk.Action
@@ -218,28 +227,16 @@ func (w *mainWindow) buildUI() error {
 		MinSize:  dcl.Size{Width: 940, Height: 640},
 		Size:     dcl.Size{Width: 1060, Height: 720},
 		Layout:   dcl.VBox{MarginsZero: true, SpacingZero: true},
+		// 所有操作都放在菜单栏和列表右键菜单里，不再占用顶部空间。
+		MenuItems: w.buildMenuItems(),
 		Children: []dcl.Widget{
-			// ---- 工具栏 ----
-			dcl.Composite{
-				Layout: dcl.HBox{Spacing: 6, Margins: dcl.Margins{Left: 8, Top: 6, Right: 8, Bottom: 6}},
-				Children: []dcl.Widget{
-					dcl.PushButton{Text: "添加", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.addProgram() }},
-					dcl.PushButton{AssignTo: &w.btnEdit, Text: "编辑", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.editSelected() }},
-					dcl.PushButton{AssignTo: &w.btnRemove, Text: "删除", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.removeSelected() }},
-					dcl.VSpacer{},
-					dcl.PushButton{AssignTo: &w.btnStart, Text: "启动", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.startSelected() }},
-					dcl.PushButton{AssignTo: &w.btnStop, Text: "停止", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.stopSelected() }},
-					dcl.PushButton{AssignTo: &w.btnRestart, Text: "重启", MinSize: dcl.Size{Width: 76}, OnClicked: func() { w.restartSelected() }},
-					dcl.PushButton{Text: "启动全部", MinSize: dcl.Size{Width: 86}, OnClicked: func() { w.startAll() }},
-					dcl.PushButton{Text: "停止全部", MinSize: dcl.Size{Width: 86}, OnClicked: func() { w.stopAll() }},
-				},
-			},
 			dcl.HSplitter{
-				HandleWidth: 4,
+				StretchFactor: 1,
+				HandleWidth:   4,
 				Children: []dcl.Widget{
 					// ---- 左侧：程序列表 ----
 					dcl.Composite{
-						Layout: dcl.VBox{Margins: dcl.Margins{Left: 8, Top: 6, Right: 4, Bottom: 6}, Spacing: 6},
+						Layout: dcl.VBox{Margins: dcl.Margins{Left: 4, Top: 4, Right: 2, Bottom: 4}, Spacing: 0},
 						Children: []dcl.Widget{
 							dcl.TableView{
 								AssignTo:                 &w.table,
@@ -251,112 +248,143 @@ func (w *mainWindow) buildUI() error {
 								NotSortableByHeaderClick: true,
 								MinSize:                  dcl.Size{Width: 360},
 								Columns: []dcl.TableViewColumn{
-									{Title: "名称", Width: 190},
-									{Title: "状态", Width: 76},
-									{Title: "PID", Width: 62},
-									{Title: "类型", Width: 84},
-									{Title: "定时", Width: 150},
+									{Title: "名称", Width: 180},
+									{Title: "状态", Width: 72},
+									{Title: "PID", Width: 58},
+									{Title: "类型", Width: 78},
+									{Title: "定时", Width: 140},
 								},
 								OnCurrentIndexChanged: func() { w.onTableSelection() },
 								OnItemActivated:       func() { w.editSelected() },
 							},
 						},
 					},
-					// ---- 右侧：详情 ----
+					// ---- 右侧：标题条 + 选项卡 ----
 					dcl.Composite{
-						Layout: dcl.VBox{Margins: dcl.Margins{Left: 4, Top: 6, Right: 8, Bottom: 6}, Spacing: 8},
+						Layout: dcl.VBox{Margins: dcl.Margins{Left: 3, Top: 4, Right: 6, Bottom: 4}, Spacing: 4},
 						Children: []dcl.Widget{
-							dcl.GroupBox{
-								Title:  "程序详情",
-								Layout: dcl.VBox{Spacing: 4},
+							// 单行标题：程序名、状态、PID/运行时长。
+							// 不再占用独立分组，把高度留给下面的选项卡。
+							dcl.Composite{
+								Layout: dcl.HBox{
+									Spacing:   10,
+									Margins:   dcl.Margins{Left: 2, Top: 2, Right: 2, Bottom: 2},
+									Alignment: dcl.AlignHNearVNear,
+								},
 								Children: []dcl.Widget{
 									dcl.Label{
 										AssignTo: &w.lblTitle,
 										Text:     "未选择程序",
-										Font:     dcl.Font{PointSize: 14, Bold: true},
+										Font:     dcl.Font{PointSize: 12, Bold: true},
 									},
 									dcl.Label{
 										AssignTo: &w.lblState,
 										Text:     "",
 										Font:     dcl.Font{Bold: true},
 									},
-									dcl.Label{
-										AssignTo: &w.lblInfo,
-										Text:     "点击「添加」创建第一个被管理的程序。",
-									},
-									dcl.Label{
-										AssignTo: &w.lblMeta,
-										Text:     "",
-										TextColor: walk.RGB(100, 116, 139),
-									},
-								},
-							},
-							dcl.GroupBox{
-								Title:  "运行状态（可选探测）",
-								Layout: dcl.VBox{},
-								Children: []dcl.Widget{
-									dcl.Composite{
-										AssignTo: &w.probeContainer,
-										MinSize:  dcl.Size{Height: 72},
-										Layout:   dcl.Flow{Spacing: 6},
-									},
-								},
-							},
-							dcl.Composite{
-								Layout: dcl.HBox{Spacing: 6},
-								Children: []dcl.Widget{
-									dcl.Label{Text: "运行日志", Font: dcl.Font{Bold: true}},
 									dcl.HSpacer{},
-									dcl.PushButton{
-										AssignTo: &w.btnClearLog,
-										Text:     "清空",
-										MinSize:  dcl.Size{Width: 64},
-										OnClicked: func() { w.clearCurrentLog() },
-									},
-									dcl.PushButton{
-										Text:     "复制全部",
-										MinSize:  dcl.Size{Width: 76},
-										OnClicked: func() { w.copyCurrentLog() },
+									dcl.Label{
+										AssignTo:  &w.lblInfo,
+										Text:      "",
+										TextColor: walk.RGB(71, 85, 105),
 									},
 								},
 							},
-							dcl.TextEdit{
-								AssignTo:      &w.logEdit,
-								ReadOnly:      true,
-								HScroll:       true,
-								VScroll:       true,
-								MinSize:       dcl.Size{Height: 180},
+							dcl.TabWidget{
+								AssignTo:      &w.tabs,
 								StretchFactor: 1,
-								TextColor:     walk.RGB(226, 232, 240),
-								Background:    dcl.SolidColorBrush{Color: walk.RGB(15, 23, 42)},
-								Font:          dcl.Font{Family: "Consolas", PointSize: 9},
+								Pages: []dcl.TabPage{
+									// ---- 日志页（默认显示）----
+									{
+										Title:  "运行日志",
+										Layout: dcl.VBox{Spacing: 6},
+										Children: []dcl.Widget{
+											dcl.Composite{
+												Layout: dcl.HBox{Spacing: 6},
+												Children: []dcl.Widget{
+													dcl.Label{
+														AssignTo:  &w.lblMeta,
+														Text:      "",
+														TextColor: walk.RGB(100, 116, 139),
+													},
+													dcl.HSpacer{},
+													dcl.PushButton{
+														AssignTo:  &w.btnClearLog,
+														Text:      "清空",
+														MinSize:   dcl.Size{Width: 64},
+														OnClicked: func() { w.clearCurrentLog() },
+													},
+													dcl.PushButton{
+														Text:      "复制全部",
+														MinSize:   dcl.Size{Width: 76},
+														OnClicked: func() { w.copyCurrentLog() },
+													},
+												},
+											},
+											dcl.TextEdit{
+												AssignTo:      &w.logEdit,
+												ReadOnly:      true,
+												HScroll:       true,
+												VScroll:       true,
+												MinSize:       dcl.Size{Height: 120},
+												StretchFactor: 1,
+												TextColor:     walk.RGB(226, 232, 240),
+												Background:    dcl.SolidColorBrush{Color: walk.RGB(15, 23, 42)},
+												Font:          dcl.Font{Family: "Consolas", PointSize: 9},
+											},
+										},
+									},
+									// ---- 状态页 ----
+									{
+										AssignTo: &w.statusPage,
+										Title:    "运行状态",
+										Layout:   dcl.VBox{Spacing: 6},
+										Children: []dcl.Widget{
+											dcl.Composite{
+												Layout: dcl.HBox{Spacing: 6, Alignment: dcl.AlignHNearVNear},
+												Children: []dcl.Widget{
+													dcl.Label{
+														Text:      "探测数据",
+														Font:      dcl.Font{Bold: true},
+														TextColor: walk.RGB(71, 85, 105),
+													},
+													dcl.HSpacer{},
+													dcl.PushButton{
+														Text:      "立即刷新",
+														MinSize:   dcl.Size{Width: 80},
+														OnClicked: func() { w.requestProbe(w.current) },
+													},
+												},
+											},
+											dcl.Composite{
+												AssignTo: &w.probeContainer,
+												MinSize:  dcl.Size{Height: 72},
+												Layout:   dcl.Flow{Spacing: 6},
+											},
+											dcl.Label{
+												AssignTo:  &w.lblProbeHint,
+												Text:      "",
+												TextColor: walk.RGB(148, 163, 184),
+											},
+											dcl.VSpacer{},
+										},
+									},
+								},
 							},
 						},
 					},
 				},
 			},
 			// ---- 状态栏 ----
+			// 只保留一行文字信息，勾选项移到菜单栏，避免底部占高。
 			dcl.Composite{
-				Layout: dcl.HBox{Spacing: 12, Margins: dcl.Margins{Left: 10, Top: 4, Right: 10, Bottom: 4}},
+				MaxSize: dcl.Size{Height: 24},
+				MinSize: dcl.Size{Height: 24},
+				Layout:  dcl.HBox{Spacing: 10, Margins: dcl.Margins{Left: 8, Top: 3, Right: 8, Bottom: 3}},
 				Children: []dcl.Widget{
 					dcl.Label{AssignTo: &w.lblStatusBar, Text: "共 0 个程序"},
 					dcl.HSpacer{},
-					dcl.CheckBox{
-						AssignTo:         &w.chkAutoStart,
-						Text:             "开机自启",
-						OnCheckedChanged: func() { w.toggleAutoStart() },
-					},
-					dcl.CheckBox{
-						AssignTo:         &w.chkMinimize,
-						Text:             "关闭时最小化到托盘",
-						OnCheckedChanged: func() { w.toggleMinimize() },
-					},
 					dcl.Label{AssignTo: &w.lblAdmin, Text: adminText()},
-					dcl.PushButton{
-						Text:      "配置目录",
-						MinSize:   dcl.Size{Width: 76},
-						OnClicked: func() { openConfigFolder() },
-					},
 				},
 			},
 		},
@@ -370,7 +398,81 @@ func (w *mainWindow) buildUI() error {
 		w.onClosing(canceled)
 	})
 	w.mw.SizeChanged().Attach(func() { w.updateStatusBar() })
+
+	// 默认停留在「运行日志」页；状态页排在第二个。
+	_ = w.tabs.SetCurrentIndex(0)
+
+	w.buildTableContextMenu()
 	return nil
+}
+
+// buildTableContextMenu 给程序列表挂上右键菜单。
+//
+// TableView 右键不会自动选中命中的行，这里先命中测试再手动选中，
+// 避免菜单操作作用到上一次选中的程序上。
+func (w *mainWindow) buildTableContextMenu() {
+	if w.table == nil {
+		return
+	}
+	menu, err := walk.NewMenu()
+	if err != nil {
+		return
+	}
+
+	add := walk.NewAction()
+	_ = add.SetText("添加新程序…")
+	add.Triggered().Attach(func() { w.addProgram() })
+	_ = menu.Actions().Add(add)
+
+	_ = menu.Actions().Add(walk.NewSeparatorAction())
+
+	edit := walk.NewAction()
+	_ = edit.SetText("编辑…")
+	edit.Triggered().Attach(func() { w.editSelected() })
+	_ = menu.Actions().Add(edit)
+
+	remove := walk.NewAction()
+	_ = remove.SetText("删除")
+	remove.Triggered().Attach(func() { w.removeSelected() })
+	_ = menu.Actions().Add(remove)
+
+	_ = menu.Actions().Add(walk.NewSeparatorAction())
+
+	start := walk.NewAction()
+	_ = start.SetText("启动")
+	start.Triggered().Attach(func() { w.startSelected() })
+	_ = menu.Actions().Add(start)
+
+	stop := walk.NewAction()
+	_ = stop.SetText("停止")
+	stop.Triggered().Attach(func() { w.stopSelected() })
+	_ = menu.Actions().Add(stop)
+
+	restart := walk.NewAction()
+	_ = restart.SetText("重启")
+	restart.Triggered().Attach(func() { w.restartSelected() })
+	_ = menu.Actions().Add(restart)
+
+	// 右键时按命中的行切换选中项；空白处右键则清空选择。
+	w.table.MouseDown().Attach(func(x, y int, button walk.MouseButton) {
+		if button != walk.RightButton {
+			return
+		}
+		index := w.table.IndexAt(x, y)
+		if index >= 0 {
+			_ = w.table.SetCurrentIndex(index)
+		}
+		hasSelection := w.current != nil
+		running := hasSelection && w.current.State() == StateRunning
+		stopped := hasSelection && w.current.State() == StateStopped
+		edit.SetEnabled(hasSelection)
+		remove.SetEnabled(hasSelection)
+		start.SetEnabled(stopped)
+		stop.SetEnabled(running)
+		restart.SetEnabled(hasSelection)
+	})
+
+	w.table.SetContextMenu(menu)
 }
 
 // updateStatusBar 汇总全局状态，显示在窗口底部。
@@ -458,7 +560,23 @@ func (w *mainWindow) appendLogLine(line string) {
 	if w.logEdit == nil {
 		return
 	}
+	// 只有用户本来就在底部时才跟随滚动；
+	// 向上翻看历史日志时不要把它拽回去。
+	firstVisible := w.logEdit.SendMessage(win.EM_GETFIRSTVISIBLELINE, 0, 0)
+	lineCount := w.logEdit.SendMessage(win.EM_GETLINECOUNT, 0, 0)
+	visibleLines := 0
+	if bounds := w.logEdit.BoundsPixels(); bounds.Height > 0 {
+		visibleLines = int(bounds.Height) / 18
+	}
+	atBottom := visibleLines > 0 &&
+		int(lineCount)-int(firstVisible) <= visibleLines+1
+
 	w.logEdit.AppendText(time.Now().Format("15:04:05") + "  " + line + "\r\n")
+
+	if atBottom {
+		w.logEdit.SendMessage(win.EM_SETSEL, 0x7FFFFFFF, 0x7FFFFFFF)
+		w.logEdit.SendMessage(win.EM_SCROLLCARET, 0, 0)
+	}
 }
 
 func (w *mainWindow) onRunnerCrash(r *Runner, code int) {
@@ -498,9 +616,12 @@ func (w *mainWindow) onTableSelection() {
 func (w *mainWindow) showEmptyDetail() {
 	_ = w.lblTitle.SetText("未选择程序")
 	_ = w.lblState.SetText("")
-	_ = w.lblInfo.SetText("点击「添加」创建第一个被管理的程序。")
+	_ = w.lblInfo.SetText("点击「添加」创建第一个被管理的程序")
 	_ = w.lblMeta.SetText("")
 	w.clearProbeFields()
+	if w.lblProbeHint != nil {
+		_ = w.lblProbeHint.SetText("")
+	}
 	if w.logEdit != nil {
 		_ = w.logEdit.SetText("")
 	}
@@ -523,23 +644,25 @@ func (w *mainWindow) refreshDetailFull() {
 }
 
 // describeProgram 汇总右栏的固定信息：路径、类型、定时、探测。
+// describeProgram 生成日志页顶部的一行摘要。完整路径已由悬停提示给出，
+// 这里只放最需要快速确认的信息，避免占满一行。
 func (w *mainWindow) describeProgram(cfg *ProgramConfig) string {
-	parts := []string{"路径：" + cfg.ExePath}
+	parts := make([]string, 0, 4)
 	label := cfg.ScriptLabel()
 	if cfg.NeedsInterpreter() {
-		label += "（通过解释器运行）"
+		label += "（解释器）"
 	}
-	parts = append(parts, "类型："+label)
+	parts = append(parts, label)
 	if summary := w.current.ScheduleSummary(); summary != "" {
-		parts = append(parts, "定时："+summary)
+		parts = append(parts, "定时 "+summary)
 	}
 	if cfg.ProbeEnabled {
-		parts = append(parts, fmt.Sprintf("探测：%s，每 %d 秒", cfg.ProbeParser, cfg.ProbeInterval/1000))
+		parts = append(parts, fmt.Sprintf("探测 %d 秒", cfg.ProbeInterval/1000))
 	}
 	if cfg.AutoRestart {
-		parts = append(parts, "崩溃自动重启")
+		parts = append(parts, "崩溃重启")
 	}
-	return strings.Join(parts, "　|　")
+	return strings.Join(parts, " · ")
 }
 
 func (w *mainWindow) refreshDetail() {
@@ -600,15 +723,9 @@ func (w *mainWindow) copyCurrentLog() {
 	}
 }
 
+// setButtonsEnabled 现在改为刷新菜单项可用性；保留函数名以减少调用点改动。
 func (w *mainWindow) setButtonsEnabled(canStart, canStop, hasSelection bool) {
-	if w.btnStart == nil {
-		return
-	}
-	w.btnStart.SetEnabled(hasSelection && canStart)
-	w.btnStop.SetEnabled(hasSelection && canStop)
-	w.btnRestart.SetEnabled(hasSelection)
-	w.btnEdit.SetEnabled(hasSelection)
-	w.btnRemove.SetEnabled(hasSelection)
+	w.updateMenuEnabled()
 	if w.btnClearLog != nil {
 		w.btnClearLog.SetEnabled(hasSelection)
 	}
@@ -640,6 +757,7 @@ func (w *mainWindow) clearProbeFields() {
 		children.At(0).Dispose()
 	}
 	w.probeContainer.SetSuspended(false)
+	w.setStatusTabTitle(0)
 }
 
 func (w *mainWindow) renderProbe(result *ProbeResult) {
@@ -669,6 +787,60 @@ func (w *mainWindow) renderProbe(result *ProbeResult) {
 			label.SetTextColor(walk.RGB(220, 38, 38))
 		}
 	}
+	w.updateProbeHint(result)
+}
+
+// updateProbeHint 在状态页底部说明当前探测情况，避免空白页让人困惑。
+func (w *mainWindow) updateProbeHint(result *ProbeResult) {
+	if w.lblProbeHint == nil {
+		return
+	}
+	if w.current == nil {
+		_ = w.lblProbeHint.SetText("")
+		return
+	}
+	cfg := w.current.Config()
+	switch {
+	case !cfg.ProbeEnabled:
+		_ = w.lblProbeHint.SetText("该程序未启用状态探测。" +
+			"可在「编辑 → 状态探测」中配置查询命令，这里会显示解析结果。")
+	case !w.current.IsRunning():
+		_ = w.lblProbeHint.SetText("程序未运行，暂无探测数据。")
+	case result == nil || len(result.Fields) == 0:
+		_ = w.lblProbeHint.SetText("等待探测结果…（查询命令：" +
+			cfg.ProbeCommand + "）")
+	default:
+		level := "未知"
+		switch result.Level {
+		case ProbeOK:
+			level = "正常"
+		case ProbeBad:
+			level = "异常"
+		}
+		_ = w.lblProbeHint.SetText(fmt.Sprintf("状态：%s　已解析 %d 项　每 %d 秒刷新",
+			level, len(result.Fields), cfg.ProbeInterval/1000))
+	}
+	w.setStatusTabTitle(probeFieldCount(result))
+}
+
+// probeFieldCount 返回状态页应展示的数据量，用于标题提示。
+func probeFieldCount(result *ProbeResult) int {
+	if result == nil {
+		return 0
+	}
+	return len(result.Fields)
+}
+
+// setStatusTabTitle 在状态页标题上附带数据量，不切页也能看出有没有内容。
+func (w *mainWindow) setStatusTabTitle(count int) {
+	if w.statusPage == nil {
+		return
+	}
+	title := "运行状态"
+	if count > 0 {
+		title = fmt.Sprintf("运行状态 (%d)", count)
+	}
+	_ = w.statusPage.SetTitle(title)
 }
 
 // ---------------------------------------------------------------- 动作
@@ -804,6 +976,138 @@ func (w *mainWindow) selectByID(id string) {
 func (w *mainWindow) saveConfig() {
 	if err := w.app.save(); err != nil {
 		walk.MsgBox(w.mw, "保存失败", err.Error(), walk.MsgBoxIconError)
+	}
+}
+
+// ---------------------------------------------------------------- 菜单栏
+
+// buildMenuItems 构建窗口菜单栏。原来工具栏上的所有操作都收进这里，
+// 顶部因此不再占用任何高度。
+func (w *mainWindow) buildMenuItems() []dcl.MenuItem {
+	// 选中程序相关动作：没有选中时应禁用。
+	selectionItems := []dcl.MenuItem{
+		dcl.Action{
+			AssignTo:    &w.actionEdit,
+			Text:        "编辑…",
+			OnTriggered: func() { w.editSelected() },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionRemove,
+			Text:        "删除",
+			OnTriggered: func() { w.removeSelected() },
+		},
+		dcl.Separator{},
+		dcl.Action{
+			AssignTo:    &w.actionStart,
+			Text:        "启动",
+			OnTriggered: func() { w.startSelected() },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionStop,
+			Text:        "停止",
+			OnTriggered: func() { w.stopSelected() },
+		},
+		dcl.Action{
+			AssignTo:    &w.actionRestart,
+			Text:        "重启",
+			OnTriggered: func() { w.restartSelected() },
+		},
+	}
+
+	return []dcl.MenuItem{
+		dcl.Menu{
+			Text: "程序(&P)",
+			Items: append([]dcl.MenuItem{
+				dcl.Action{
+					AssignTo:    &w.actionAdd,
+					Text:        "添加新程序…",
+					Shortcut:    dcl.Shortcut{Modifiers: walk.ModControl, Key: walk.KeyN},
+					OnTriggered: func() { w.addProgram() },
+				},
+				dcl.Separator{},
+			}, selectionItems...),
+		},
+		dcl.Menu{
+			Text: "批量(&B)",
+			Items: []dcl.MenuItem{
+				dcl.Action{Text: "启动全部", OnTriggered: func() { w.startAll() }},
+				dcl.Action{Text: "停止全部", OnTriggered: func() { w.stopAll() }},
+			},
+		},
+		dcl.Menu{
+			Text: "选项(&O)",
+			Items: []dcl.MenuItem{
+				dcl.Action{
+					AssignTo:  &w.actionAutoStart,
+					Text:      "开机自动启动本管理器",
+					Checkable: true,
+					Checked:   w.app.AutoStartManager,
+					OnTriggered: func() {
+						w.toggleAutoStart(w.actionAutoStart.Checked())
+					},
+				},
+				dcl.Action{
+					AssignTo:  &w.actionMinimize,
+					Text:      "关闭窗口时最小化到托盘",
+					Checkable: true,
+					Checked:   w.app.MinimizeToTray,
+					OnTriggered: func() {
+						w.toggleMinimize(w.actionMinimize.Checked())
+					},
+				},
+				dcl.Separator{},
+				dcl.Action{
+					Text:        "打开配置目录",
+					OnTriggered: func() { openConfigFolder() },
+				},
+			},
+		},
+		dcl.Action{
+			Text:        "关于",
+			OnTriggered: func() { w.showAbout() },
+		},
+	}
+}
+
+// showAbout 显示版本与基本信息。
+func (w *mainWindow) showAbout() {
+	walk.MsgBox(w.mw, "关于 MultiPro",
+		"MultiPro 通用程序管理器\n\n"+
+			"管理多个长驻程序的启动、停止与定时执行。\n"+
+			"配置文件："+stateConfigPath()+"\n\n"+
+			adminText(),
+		walk.MsgBoxIconInformation)
+}
+
+// stateConfigPath 返回配置文件路径，取不到时给出占位说明。
+func stateConfigPath() string {
+	path, err := configPath()
+	if err != nil {
+		return "(不可用)"
+	}
+	return path
+}
+
+// updateMenuEnabled 根据当前选择与运行状态刷新菜单项的可用性。
+func (w *mainWindow) updateMenuEnabled() {
+	hasSelection := w.current != nil
+	running := hasSelection && w.current.State() == StateRunning
+	stopped := hasSelection && w.current.State() == StateStopped
+
+	if w.actionEdit != nil {
+		w.actionEdit.SetEnabled(hasSelection)
+	}
+	if w.actionRemove != nil {
+		w.actionRemove.SetEnabled(hasSelection)
+	}
+	if w.actionStart != nil {
+		w.actionStart.SetEnabled(stopped)
+	}
+	if w.actionStop != nil {
+		w.actionStop.SetEnabled(running)
+	}
+	if w.actionRestart != nil {
+		w.actionRestart.SetEnabled(hasSelection)
 	}
 }
 
@@ -1028,6 +1332,7 @@ func (w *mainWindow) runProbes() {
 func (w *mainWindow) requestProbe(r *Runner) {
 	if r == nil || !r.Config().ProbeEnabled || !r.IsRunning() {
 		w.clearProbeFields()
+		w.updateProbeHint(nil)
 		return
 	}
 	r.MarkProbed()
@@ -1048,25 +1353,34 @@ func (w *mainWindow) requestProbe(r *Runner) {
 
 func (w *mainWindow) applyAutoStartFromConfig() {
 	_ = applyAutoStart(w.app.AutoStartManager)
-	if w.chkAutoStart != nil {
-		w.chkAutoStart.SetChecked(w.app.AutoStartManager)
-	}
-	if w.chkMinimize != nil {
-		w.chkMinimize.SetChecked(w.app.MinimizeToTray)
-	}
+	w.syncMenuChecks()
 }
 
-func (w *mainWindow) toggleAutoStart() {
-	w.app.AutoStartManager = w.chkAutoStart.Checked()
-	if err := applyAutoStart(w.app.AutoStartManager); err != nil {
+// toggleAutoStart 由菜单项触发。菜单是勾选式的，状态即当前值。
+func (w *mainWindow) toggleAutoStart(enabled bool) {
+	w.app.AutoStartManager = enabled
+	if err := applyAutoStart(enabled); err != nil {
 		walk.MsgBox(w.mw, "开机自启", err.Error(), walk.MsgBoxIconWarning)
+		// 写入注册表失败时把菜单勾选恢复成实际状态。
+		w.syncMenuChecks()
 	}
 	w.saveConfig()
 }
 
-func (w *mainWindow) toggleMinimize() {
-	w.app.MinimizeToTray = w.chkMinimize.Checked()
+func (w *mainWindow) toggleMinimize(enabled bool) {
+	w.app.MinimizeToTray = enabled
 	w.saveConfig()
+	w.syncMenuChecks()
+}
+
+// syncMenuChecks 让菜单里的勾选状态与配置保持一致。
+func (w *mainWindow) syncMenuChecks() {
+	if w.actionAutoStart != nil {
+		_ = w.actionAutoStart.SetChecked(w.app.AutoStartManager)
+	}
+	if w.actionMinimize != nil {
+		_ = w.actionMinimize.SetChecked(w.app.MinimizeToTray)
+	}
 }
 
 func (w *mainWindow) startAutoPrograms() {

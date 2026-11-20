@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,18 +195,6 @@ func TestNormalizeClock(t *testing.T) {
 	}
 }
 
-func TestValidateClock(t *testing.T) {
-	if err := validateClock(""); err != nil {
-		t.Errorf("empty should be valid: %v", err)
-	}
-	if err := validateClock("08:30"); err != nil {
-		t.Errorf("valid time rejected: %v", err)
-	}
-	if err := validateClock("25:00"); err == nil {
-		t.Error("invalid time accepted")
-	}
-}
-
 func TestScheduleDue(t *testing.T) {
 	now := time.Date(2026, 11, 20, 8, 30, 10, 0, time.Local)
 	var zero time.Time
@@ -350,4 +339,68 @@ func TestProgramIconCache(t *testing.T) {
 	if third == first {
 		t.Error("cache clear should produce a new icon object")
 	}
+}
+
+// ---------------------------------------------------------------- 生成图标
+
+func TestGeneratedIconNotNil(t *testing.T) {
+	cases := []string{"运维端口", "wb2api", "A", "123", ""}
+	for _, name := range cases {
+		cfg := &ProgramConfig{Name: name, ExePath: "missing.exe"}
+		icon := programIcon(cfg)
+		if icon == nil {
+			t.Errorf("icon for %q must not be nil", name)
+		}
+	}
+}
+
+func TestGeneratedIconColorStable(t *testing.T) {
+	// 同名程序应得到同一个颜色（哈希稳定）
+	if hashString("wb2api") != hashString("wb2api") {
+		t.Fatal("hash must be deterministic")
+	}
+	different := hashString("wb2api") != hashString("运维端口")
+	if !different {
+		t.Log("hash collision is acceptable but unexpected here")
+	}
+}
+
+func TestFirstRune(t *testing.T) {
+	cases := map[string]rune{
+		"abc": 'a',
+		"运维":  '运',
+		"":    '?',
+		"1x":  '1',
+	}
+	for in, want := range cases {
+		if got := firstRune(in); got != want {
+			t.Errorf("%q => %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestInRoundedRect(t *testing.T) {
+	const size, radius = 32, 6
+	if !inRoundedRect(16, 16, size, radius) {
+		t.Error("center should be inside")
+	}
+	if inRoundedRect(0, 0, size, radius) {
+		t.Error("corner should be outside (rounded)")
+	}
+	if inRoundedRect(-1, 5, size, radius) {
+		t.Error("out of bounds should be outside")
+	}
+}
+
+func TestDrawGlyphFallback(t *testing.T) {
+	// 无法识别的字符（中文）不应 panic
+	img := newTestImage(32)
+	drawGlyph(img, '运', 32)
+	img2 := newTestImage(32)
+	drawGlyph(img2, 'A', 32)
+}
+
+// newTestImage 创建一个测试用的空白图像。
+func newTestImage(size int) *image.RGBA {
+	return image.NewRGBA(image.Rect(0, 0, size, size))
 }
