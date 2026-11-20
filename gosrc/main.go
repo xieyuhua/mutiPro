@@ -117,6 +117,39 @@ func (m *rowModel) rebuild(runners []*Runner) {
 	m.PublishRowsReset()
 }
 
+// insert 在列表末尾追加一行，不触碰已有行。
+func (m *rowModel) insert(r *Runner) {
+	m.mu.Lock()
+	index := len(m.rows)
+	m.rows = append(m.rows, &programRow{runner: r})
+	m.mu.Unlock()
+	m.PublishRowsInserted(index, index)
+}
+
+// replace 把指定位置的 Runner 换成新的，其余行保持不变。
+func (m *rowModel) replace(index int, r *Runner) {
+	m.mu.Lock()
+	if index < 0 || index >= len(m.rows) {
+		m.mu.Unlock()
+		return
+	}
+	m.rows[index] = &programRow{runner: r}
+	m.mu.Unlock()
+	m.PublishRowChanged(index)
+}
+
+// removeAt 删除指定行。
+func (m *rowModel) removeAt(index int) {
+	m.mu.Lock()
+	if index < 0 || index >= len(m.rows) {
+		m.mu.Unlock()
+		return
+	}
+	m.rows = append(m.rows[:index], m.rows[index+1:]...)
+	m.mu.Unlock()
+	m.PublishRowsRemoved(index, index)
+}
+
 func (m *rowModel) publishAll() {
 	m.mu.Lock()
 	count := len(m.rows)
@@ -505,6 +538,23 @@ func adminText() string {
 
 // ---------------------------------------------------------------- Runner
 
+// makeRunner 创建一个带事件回调的 Runner。
+func (w *mainWindow) makeRunner(cfg *ProgramConfig) *Runner {
+	r := newRunner(cfg)
+	r.OnStateChanged = func(runner *Runner) {
+		w.uiAsync(func() { w.onRunnerState(runner) })
+	}
+	r.OnLog = func(runner *Runner, line string) {
+		w.uiAsync(func() { w.onRunnerLog(runner, line) })
+	}
+	r.OnCrashed = func(runner *Runner, code int) {
+		w.uiAsync(func() { w.onRunnerCrash(runner, code) })
+	}
+	return r
+}
+
+// buildRunners 全量重建。只在启动时使用；编辑/新增/删除必须走增量方法，
+// 否则会把所有正在运行的程序一起杀掉。
 func (w *mainWindow) buildRunners() {
 	for _, r := range w.runners {
 		r.Kill()
@@ -512,22 +562,54 @@ func (w *mainWindow) buildRunners() {
 	w.runners = nil
 
 	for _, cfg := range w.app.Programs {
-		r := newRunner(cfg)
-		r.OnStateChanged = func(runner *Runner) {
-			w.uiAsync(func() { w.onRunnerState(runner) })
-		}
-		r.OnLog = func(runner *Runner, line string) {
-			w.uiAsync(func() { w.onRunnerLog(runner, line) })
-		}
-		r.OnCrashed = func(runner *Runner, code int) {
-			w.uiAsync(func() { w.onRunnerCrash(runner, code) })
-		}
-		w.runners = append(w.runners, r)
+		w.runners = append(w.runners, w.makeRunner(cfg))
 	}
 	w.model.rebuild(w.runners)
 	if len(w.runners) > 0 {
 		_ = w.table.SetCurrentIndex(0)
 	}
+}
+
+// runnerIndex 返回 Runner 在切片中的位置。
+func (w *mainWindow) runnerIndex(r *Runner) int {
+	for i, item := range w.runners {
+		if item == r {
+			return i
+		}
+	}
+	return -1
+}
+
+// replaceRunner 只替换指定 Runner，其他程序完全不受影响。
+func (w *mainWindow) replaceRunner(old *Runner, cfg *ProgramConfig) *Runner {
+	index := w.runnerIndex(old)
+	if index < 0 {
+		return nil
+	}
+	old.Kill()
+	replacement := w.makeRunner(cfg)
+	w.runners[index] = replacement
+	w.model.replace(index, replacement)
+	return replacement
+}
+
+// appendRunner 新增一个程序，已有程序保持原状。
+func (w *mainWindow) appendRunner(cfg *ProgramConfig) *Runner {
+	r := w.makeRunner(cfg)
+	w.runners = append(w.runners, r)
+	w.model.insert(r)
+	return r
+}
+
+// removeRunner 删除一个程序，其他程序保持原状。
+func (w *mainWindow) removeRunner(target *Runner) {
+	index := w.runnerIndex(target)
+	if index < 0 {
+		return
+	}
+	target.Kill()
+	w.runners = append(w.runners[:index], w.runners[index+1:]...)
+	w.model.removeAt(index)
 }
 
 // uiAsync 把后台 goroutine 的回调切到 UI 线程。
@@ -903,7 +985,8 @@ func (w *mainWindow) addProgram() {
 	w.app.Programs = append(w.app.Programs, cfg)
 	w.saveConfig()
 	clearIconCache()
-	w.buildRunners()
+	// 只追加新行，不影响其他正在运行的程序。
+	w.appendRunner(cfg)
 	w.selectByID(cfg.ID)
 }
 
@@ -924,16 +1007,25 @@ func (w *mainWindow) editSelected() {
 		}
 	}
 	w.saveConfig()
-
-	wasRunning := w.current.IsRunning()
-	if wasRunning {
-		w.current.Stop()
-	}
 	clearIconCache()
-	w.buildRunners()
+
+	// 只替换被编辑的这一个 Runner，其他程序保持运行。
+	// 这里的程序若本来在运行，重启后才会应用新参数。
+	previous := w.current
+	wasRunning := previous.IsRunning()
+	replacement := w.replaceRunner(previous, cfg)
+	if replacement == nil {
+		return
+	}
+	// 索引没变时 SetCurrentIndex 不会触发选中事件，
+	// 必须显式把 current 指向新 Runner 并刷新详情。
+	w.current = replacement
 	w.selectByID(cfg.ID)
+	w.current = replacement
+	w.refreshDetailFull()
 	if wasRunning {
-		walk.MsgBox(w.mw, "提示", "程序正在运行，新配置将在下次启动时生效；已为您停止程序。",
+		walk.MsgBox(w.mw, "提示",
+			"该程序正在运行，已被停止；新配置将在下次启动时生效。\n其他程序未受影响。",
 			walk.MsgBoxIconInformation)
 	}
 }
@@ -947,16 +1039,19 @@ func (w *mainWindow) removeSelected() {
 		walk.MsgBoxYesNo|walk.MsgBoxIconQuestion) != walk.DlgCmdYes {
 		return
 	}
-	w.current.Stop()
 	for i, p := range w.app.Programs {
 		if p.ID == cfg.ID {
 			w.app.Programs = append(w.app.Programs[:i], w.app.Programs[i+1:]...)
 			break
 		}
 	}
-	w.current = nil
 	w.saveConfig()
-	w.buildRunners()
+	clearIconCache()
+
+	// 只移除这一行，其他程序继续运行。
+	target := w.current
+	w.current = nil
+	w.removeRunner(target)
 	if len(w.runners) == 0 {
 		w.showEmptyDetail()
 	} else {
