@@ -62,6 +62,11 @@ type ProgramConfig struct {
 	// 仅用于读取旧配置时迁移，保存时不再写入。
 	CronStart string `json:"cronStart,omitempty"`
 	CronStop  string `json:"cronStop,omitempty"`
+
+	// NotifyWebhook 覆盖全局 Webhook；留空则用全局默认。
+	NotifyWebhook string `json:"notifyWebhook"`
+	// NotifyPlatform 覆盖全局平台（wecom / ding）；留空则跟随全局。
+	NotifyPlatform string `json:"notifyPlatform"`
 }
 
 // 脚本执行方式。
@@ -116,6 +121,16 @@ type AppConfig struct {
 	// LogFileInitialized 与 CrashNotifyInitialized 同理，用于区分
 	// 「用户主动关闭」和「旧配置没有这个字段」。
 	LogFileInitialized bool `json:"logFileInitialized"`
+
+	// Notify 是机器人通知配置（企业微信 / 钉钉）。
+	Notify NotifyConfig `json:"notify"`
+
+	// HangDetect 卡死检测。进程存活但长时间没有日志输出即判定无响应。
+	HangDetect      bool `json:"hangDetect"`
+	HangTimeoutMin  int  `json:"hangTimeoutMin"`
+	HangAutoRestart bool `json:"hangAutoRestart"`
+	// HangInitialized 用于区分「用户关闭」与「旧配置缺失」。
+	HangInitialized bool `json:"hangInitialized"`
 }
 
 // applyDefaults 为缺失的字段补上默认值。
@@ -142,6 +157,23 @@ func (c *AppConfig) applyDefaults() {
 	}
 	if c.LogKeepDays < 0 {
 		c.LogKeepDays = 30
+	}
+
+	if !c.HangInitialized {
+		c.HangDetect = true
+		c.HangAutoRestart = true
+		c.HangInitialized = true
+	}
+	if c.HangTimeoutMin <= 0 {
+		c.HangTimeoutMin = 10
+	}
+
+	// 通知配置来自旧版本时补齐默认值。
+	if c.Notify.Platform == "" {
+		c.Notify.Platform = RobotWeCom
+	}
+	if c.Notify.LogTailLines <= 0 {
+		c.Notify.LogTailLines = 10
 	}
 }
 
@@ -172,6 +204,13 @@ func defaultAppConfig() *AppConfig {
 		LogToFile:          true,
 		LogKeepDays:        30,
 		LogFileInitialized: true,
+
+		Notify: defaultNotifyConfig(),
+
+		HangDetect:      true,
+		HangTimeoutMin:  10,
+		HangAutoRestart: true,
+		HangInitialized: true,
 	}
 }
 

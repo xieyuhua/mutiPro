@@ -225,6 +225,10 @@ type mainWindow struct {
 	windowSaveTimer *time.Timer
 	// crashNotifiedAt 记录每个程序上次崩溃提醒的时间，用于冷却。
 	crashNotifiedAt map[string]time.Time
+	// notifier 负责把事件推送到企业微信 / 钉钉机器人。
+	notifier *Notifier
+	// notifySentAt 记录每个「程序+事件」上次成功入队的时间，用于冷却。
+	notifySentAt map[string]time.Time
 }
 
 func main() {
@@ -261,6 +265,7 @@ func main() {
 		walk.MsgBox(nil, "启动失败", err.Error(), walk.MsgBoxIconError)
 		os.Exit(1)
 	}
+	w.notifier = newNotifier()
 	w.buildRunners()
 	w.buildTray()
 
@@ -597,6 +602,9 @@ func (w *mainWindow) makeRunner(cfg *ProgramConfig) *Runner {
 	}
 	r.OnCrashed = func(runner *Runner, code int) {
 		w.uiAsync(func() { w.onRunnerCrash(runner, code) })
+	}
+	r.OnExit = func(runner *Runner, info ExitInfo) {
+		w.uiAsync(func() { w.onRunnerExit(runner, info) })
 	}
 	// 按天写日志文件。关闭时不创建目录，也不占文件句柄。
 	r.SetLogFile(w.app.LogToFile, w.app.LogKeepDays)
@@ -1255,6 +1263,11 @@ func (w *mainWindow) buildMenuItems() []dcl.MenuItem {
 				},
 				dcl.Separator{},
 				dcl.Action{
+					Text:        "通知设置…",
+					OnTriggered: func() { w.openNotifySettings() },
+				},
+				dcl.Separator{},
+				dcl.Action{
 					Text:        "打开配置目录",
 					OnTriggered: func() { openConfigFolder() },
 				},
@@ -1474,6 +1487,7 @@ func (w *mainWindow) startTimers() {
 					w.refreshDetail()
 				}
 				w.runSchedules()
+				w.runHangDetection()
 				w.runProbes()
 				w.updateStatusBar()
 			})
@@ -1489,17 +1503,56 @@ func (w *mainWindow) runSchedules() {
 		switch r.CheckSchedule(now) {
 		case ActionStart:
 			w.appendSchedLog(r, "到达定时启动时间")
+			w.pushNotify(r, EventScheduled, "按定时计划启动")
 			w.tryStart(r, true)
 		case ActionStop:
 			w.appendSchedLog(r, "到达定时停止时间")
+			w.pushNotify(r, EventScheduled, "按定时计划停止")
 			go r.Stop()
 		case ActionRestart:
 			w.appendSchedLog(r, "到达周期重启时间")
+			w.pushNotify(r, EventScheduled,
+				fmt.Sprintf("按计划重启（每 %d 分钟）", r.Config().RestartEveryMin))
 			go func(runner *Runner) {
 				runner.Stop()
+				runner.MarkHangRestarted()
 				if err := runner.Start(AppDir(), false); err != nil {
 					w.uiAsync(func() {
 						w.appendSchedLog(runner, "周期重启失败："+err.Error())
+					})
+				}
+			}(r)
+		}
+	}
+}
+
+// runHangDetection 检查进程是否长时间没有输出。
+//
+// 进程还活着但不再产生任何日志，通常意味着死锁、卡在 IO 或
+// 内部循环空转。判定后发通知，并按配置重启。
+func (w *mainWindow) runHangDetection() {
+	if !w.app.HangDetect {
+		return
+	}
+	timeout := time.Duration(w.app.HangTimeoutMin) * time.Minute
+	now := time.Now()
+	for _, r := range w.runners {
+		if !r.CheckHang(timeout, now) {
+			continue
+		}
+		message := fmt.Sprintf("已 %d 分钟没有日志输出，判定为无响应",
+			w.app.HangTimeoutMin)
+		r.appendLog("=== " + message)
+		w.pushNotify(r, EventHung, message)
+
+		if w.app.HangAutoRestart {
+			r.appendLog("=== 正在重启无响应的程序")
+			go func(runner *Runner) {
+				runner.Stop()
+				runner.MarkHangRestarted()
+				if err := runner.Start(AppDir(), false); err != nil {
+					w.uiAsync(func() {
+						runner.appendLog("=== 卡死重启失败：" + err.Error())
 					})
 				}
 			}(r)
@@ -1799,6 +1852,15 @@ func (w *mainWindow) syncLogMenu() {
 	}
 }
 
+// openNotifySettings 打开机器人通知与卡死检测设置。
+func (w *mainWindow) openNotifySettings() {
+	if !showNotifyDialog(w.mw, w.app) {
+		return
+	}
+	w.saveConfig()
+	w.refreshLogWriters()
+}
+
 // openLogFolder 在资源管理器中打开日志根目录。
 func openLogFolder() {
 	dir, err := logDir()
@@ -1807,4 +1869,81 @@ func openLogFolder() {
 	}
 	_ = os.MkdirAll(dir, 0o755)
 	_ = execCommand("explorer.exe", dir)
+}
+
+// ---------------------------------------------------------------- 机器人通知
+
+// onRunnerExit 处理进程退出事件，按配置推送到机器人。
+//
+// 用户主动停止不通知；启动即失败与运行中崩溃分别对应不同事件类型。
+func (w *mainWindow) onRunnerExit(r *Runner, info ExitInfo) {
+	if info.Requested {
+		return // 主动停止，不算异常
+	}
+	event := EventCrash
+	detail := fmt.Sprintf("退出码 %d，已运行 %s", info.ExitCode, formatDurationShort(info.RunDuration))
+	if info.StartFailed {
+		event = EventStartFailed
+		detail = fmt.Sprintf("启动后 %s 即退出（退出码 %d）",
+			formatDurationShort(info.RunDuration), info.ExitCode)
+	}
+	w.pushNotify(r, event, detail)
+}
+
+// pushNotify 组装并异步发送一条机器人通知。
+//
+// 发送走独立 goroutine 且带超时，网络慢或机器人不可用时
+// 不会拖住界面，也不会影响被管理的程序。
+func (w *mainWindow) pushNotify(r *Runner, event NotifyEvent, detail string) {
+	cfg := &w.app.Notify
+	if !cfg.wants(event) {
+		return
+	}
+	if w.notifier == nil {
+		return
+	}
+
+	// 冷却去重：崩溃后自动重启的程序会周期性失败，
+	// 每失败一次就发一条会把群刷爆。按「程序 + 事件」分别计时。
+	now := time.Now()
+	key := r.Config().ID + "|" + string(event)
+	if w.notifySentAt == nil {
+		w.notifySentAt = map[string]time.Time{}
+	}
+	if last, ok := w.notifySentAt[key]; ok && now.Sub(last) < w.app.crashCooldown() {
+		return
+	}
+	w.notifySentAt[key] = now
+
+	hostname, _ := os.Hostname()
+	msg := NotifyMessage{
+		Event:      event,
+		Program:    r.Config().Name,
+		Detail:     detail,
+		LogTail:    r.LogTail(cfg.LogTailLines),
+		OccurredAt: now,
+		Hostname:   hostname,
+	}
+	program := r.Config()
+
+	go func() {
+		if err := w.notifier.Send(cfg, program, msg); err != nil {
+			// 通知失败只写本地日志，避免影响程序运行。
+			r.appendLog("=== 机器人通知发送失败：" + err.Error())
+		}
+	}()
+}
+
+// formatDurationShort 把运行时长格式化成「1小时23分」这类简短形式。
+func formatDurationShort(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%d 秒", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%d 分 %d 秒", int(d.Minutes()), int(d.Seconds())%60)
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%d 小时 %d 分", int(d.Hours()), int(d.Minutes())%60)
+	}
+	return fmt.Sprintf("%d 天 %d 小时", int(d.Hours())/24, int(d.Hours())%24)
 }

@@ -39,6 +39,9 @@ type editDialog struct {
 	txtInterp   *walk.LineEdit
 	lblModeHint *walk.Label
 
+	txtNotifyWebhook  *walk.LineEdit
+	cmbNotifyPlatform *walk.ComboBox
+
 	// 启动/停止各只有一个输入框，内容可以是 HH:MM 或 cron。
 	txtSchedStart *walk.LineEdit
 	txtSchedStop  *walk.LineEdit
@@ -58,6 +61,30 @@ var modeOptions = []string{
 	"以 PowerShell 运行（.ps1）",
 	"以 Python 运行（.py）",
 	"以 Node.js 运行（.js）",
+}
+
+// notifyPlatformIndex 把平台标识映射到下拉框索引。
+func notifyPlatformIndex(platform string) int {
+	switch strings.ToLower(strings.TrimSpace(platform)) {
+	case RobotWeCom:
+		return 1
+	case RobotDingTalk:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// notifyPlatformValue 把下拉框索引转回平台标识，0 表示跟随全局。
+func notifyPlatformValue(index int) string {
+	switch index {
+	case 1:
+		return RobotWeCom
+	case 2:
+		return RobotDingTalk
+	default:
+		return ""
+	}
 }
 
 func modeIndex(mode string) int {
@@ -312,6 +339,35 @@ func (d *editDialog) build(owner walk.Form) error {
 								AssignTo:  &d.lblCronHint,
 								Text:      "",
 								TextColor: walk.RGB(100, 116, 139),
+							},
+						},
+					},
+
+					// ---- 通知覆盖 ----
+					dcl.GroupBox{
+						Title:  "通知（可选）",
+						Layout: dcl.VBox{Spacing: 3, Alignment: dcl.AlignHNearVNear},
+						Children: []dcl.Widget{
+							dcl.Label{
+								Text:      "留空则使用「选项 → 通知设置」里的全局机器人。",
+								TextColor: walk.RGB(100, 116, 139),
+							},
+							dcl.Composite{
+								Layout: dcl.Grid{Columns: 2, Spacing: 6},
+								Children: []dcl.Widget{
+									dcl.Label{Text: "专属 Webhook"},
+									dcl.LineEdit{
+										AssignTo:    &d.txtNotifyWebhook,
+										Text:        d.cfg.NotifyWebhook,
+										ToolTipText: "仅当这个程序需要发到不同群时才填",
+									},
+									dcl.Label{Text: "平台"},
+									dcl.ComboBox{
+										AssignTo:     &d.cmbNotifyPlatform,
+										Model:        []string{"跟随全局", "企业微信", "钉钉"},
+										CurrentIndex: notifyPlatformIndex(d.cfg.NotifyPlatform),
+									},
+								},
 							},
 						},
 					},
@@ -623,6 +679,9 @@ func (d *editDialog) collect() {
 
 	d.cfg.ScriptMode = modeValue(d.cmbMode.CurrentIndex())
 	d.cfg.Interpreter = strings.TrimSpace(d.txtInterp.Text())
+
+	d.cfg.NotifyWebhook = strings.TrimSpace(d.txtNotifyWebhook.Text())
+	d.cfg.NotifyPlatform = notifyPlatformValue(d.cmbNotifyPlatform.CurrentIndex())
 
 	// 统一格式：HH:MM 规范成两位数，cron 原样保留（压缩多余空格）。
 	d.cfg.ScheduleStart = normalizeScheduleText(d.txtSchedStart.Text())

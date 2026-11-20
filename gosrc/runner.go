@@ -43,6 +43,17 @@ func (s RunState) String() string {
 	}
 }
 
+// ExitInfo 描述一次进程退出的上下文。
+type ExitInfo struct {
+	ExitCode int
+	// StartFailed 表示启动后很短时间就退出，通常意味着配置或环境有问题。
+	StartFailed bool
+	// Requested 表示是用户主动停止，不是异常。
+	Requested bool
+	// RunDuration 是本次运行的时长。
+	RunDuration time.Duration
+}
+
 const maxLogChars = 200000
 
 // procHandle 屏蔽「普通启动」和「提权启动」的差异，
@@ -78,6 +89,10 @@ type Runner struct {
 	startedAt   time.Time
 	// lastRestartCycle 记录上一轮周期重启的起点，配合 RestartEveryMin 计时。
 	lastRestartCycle time.Time
+	// 卡死检测：最近一次收到输出的时间。
+	lastOutputAt time.Time
+	// 已经就卡死发过通知，避免持续重复提醒。
+	hangReported bool
 	// 定时任务上次触发的时刻，避免同一分钟内重复触发。
 	lastSchedStart time.Time
 	lastSchedStop  time.Time
@@ -89,6 +104,10 @@ type Runner struct {
 	OnStateChanged func(*Runner)
 	OnLog          func(*Runner, string)
 	OnCrashed      func(*Runner, int)
+	// OnExit 在进程退出时总是触发（无论是否开启了自动重启）。
+	// 与 OnCrashed 的区别：OnCrashed 只在安排了重启时触发，
+	// 这里用于通知类场景，需要覆盖「启动即失败」等所有异常退出。
+	OnExit func(*Runner, ExitInfo)
 }
 
 func newRunner(cfg *ProgramConfig) *Runner {
@@ -219,6 +238,58 @@ func (r *Runner) SetLogFile(enabled bool, keepDays int) {
 	r.mu.Unlock()
 }
 
+// LogTail 返回最近 n 行非空日志，用于通知消息。
+func (r *Runner) LogTail(n int) []string {
+	r.mu.Lock()
+	text := r.log.String()
+	r.mu.Unlock()
+
+	if n <= 0 {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	// 从后往前收集，保证取到的是最新内容。
+	result := make([]string, 0, n)
+	for i := len(lines) - 1; i >= 0 && len(result) < n; i-- {
+		if line := strings.TrimSpace(lines[i]); line != "" {
+			result = append(result, line)
+		}
+	}
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result
+}
+
+// CheckHang 判断进程是否长时间没有输出。
+//
+// 返回 true 表示本轮刚判定为卡死（同一轮卡死只返回一次），
+// 调用方据此发送通知并按需重启。进程已停止时返回 false。
+func (r *Runner) CheckHang(timeout time.Duration, now time.Time) bool {
+	if timeout <= 0 {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.proc == nil || r.lastOutputAt.IsZero() || r.hangReported {
+		return false
+	}
+	if now.Sub(r.lastOutputAt) < timeout {
+		return false
+	}
+	r.hangReported = true
+	return true
+}
+
+// MarkHangRestarted 在因卡死重启后重置状态，让下一轮检测重新计时。
+func (r *Runner) MarkHangRestarted() {
+	r.mu.Lock()
+	r.hangReported = false
+	r.lastOutputAt = time.Now()
+	r.mu.Unlock()
+}
+
 // CloseLogFile 关闭日志文件句柄（退出时调用）。
 func (r *Runner) CloseLogFile() {
 	r.mu.Lock()
@@ -311,6 +382,9 @@ func (r *Runner) Start(baseDir string, fromRestart bool) error {
 	r.proc = handle
 	r.startedAt = time.Now()
 	r.lastRestartCycle = time.Now()
+	// 卡死检测以「最后一次输出」为基准，启动时重置。
+	r.lastOutputAt = time.Now()
+	r.hangReported = false
 	r.mu.Unlock()
 
 	if cfg.NeedsInterpreter() {
@@ -472,6 +546,7 @@ func (r *Runner) finishWatch(handle *procHandle, exitCode int, startedAt time.Ti
 	delayMs := r.cfg.RestartDelay
 	crashCallback := r.OnCrashed
 	stateCallback := r.OnStateChanged
+	exitCallback := r.OnExit
 	stopWanted := r.stopWanted
 	r.mu.Unlock()
 
@@ -480,8 +555,10 @@ func (r *Runner) finishWatch(handle *procHandle, exitCode int, startedAt time.Ti
 	}
 	r.appendLog("=== 进程已退出，退出码 " + strconv.Itoa(exitCode))
 
+	duration := time.Since(startedAt)
 	// 启动后立刻退出通常意味着启动失败，给出可操作的方向。
-	if exitCode != 0 && !stopWanted && time.Since(startedAt) < 5*time.Second {
+	startFailed := exitCode != 0 && !stopWanted && duration < 5*time.Second
+	if startFailed {
 		r.appendLog("=== 提示：程序启动后立即退出，常见原因是端口被占用、" +
 			"配置路径错误或缺少依赖库")
 		r.appendLog("=== 可用 netstat -ano | findstr :端口号 检查端口占用")
@@ -490,6 +567,17 @@ func (r *Runner) finishWatch(handle *procHandle, exitCode int, startedAt time.Ti
 	if stateCallback != nil {
 		stateCallback(r)
 	}
+
+	// 无论是否安排重启都通知一次，让上层决定是否发消息。
+	if exitCallback != nil {
+		exitCallback(r, ExitInfo{
+			ExitCode:    exitCode,
+			StartFailed: startFailed,
+			Requested:   stopWanted,
+			RunDuration: duration,
+		})
+	}
+
 	if !wantRestart {
 		return
 	}
