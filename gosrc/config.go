@@ -136,19 +136,35 @@ func configPath() (string, error) {
 	return filepath.Join(dir, "config.json"), nil
 }
 
-// loadConfig 读取配置。文件不存在或损坏时退回默认配置，不阻塞启动。
+// loadConfig 读取配置。主文件损坏时尝试备份，仍失败则退回默认配置，
+// 不阻塞启动。
 func loadConfig() *AppConfig {
 	path, err := configPath()
 	if err != nil {
 		return defaultAppConfig()
 	}
+	cfg, ok := readConfigFile(path)
+	if !ok {
+		// 主文件缺失或损坏：若存在备份就从备份恢复。
+		if backup, backupOK := readConfigFile(path + ".bak"); backupOK {
+			crashLog("配置读取失败，已从备份恢复：%s", path)
+			_ = backup.save()
+			return backup
+		}
+		return defaultAppConfig()
+	}
+	return cfg
+}
+
+// readConfigFile 读取并解析一个配置文件，返回是否成功。
+func readConfigFile(path string) (*AppConfig, bool) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return defaultAppConfig()
+		return nil, false
 	}
 	var cfg AppConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return defaultAppConfig()
+		return nil, false
 	}
 	if cfg.Programs == nil {
 		cfg.Programs = []*ProgramConfig{}
@@ -156,7 +172,7 @@ func loadConfig() *AppConfig {
 	for _, p := range cfg.Programs {
 		normalizeProgram(p)
 	}
-	return &cfg
+	return &cfg, true
 }
 
 func normalizeProgram(p *ProgramConfig) {
@@ -193,6 +209,11 @@ func normalizeProgram(p *ProgramConfig) {
 	p.CronStop = ""
 }
 
+// save 把配置写回磁盘。
+//
+// 直接覆盖写有两个风险：写到一半崩溃会留下半个文件，导致下次启动
+// 读不出配置（所有任务丢失）；磁盘满或断电也有同样问题。
+// 因此先写同目录的临时文件并刷盘，再原子替换正式文件。
 func (c *AppConfig) save() error {
 	path, err := configPath()
 	if err != nil {
@@ -202,7 +223,44 @@ func (c *AppConfig) save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, raw, 0o644)
+
+	tmp := path + ".tmp"
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := file.Write(raw); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
+	// 确保内容真正落盘后再替换，避免断电留下空文件。
+	if err := file.Sync(); err != nil {
+		file.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := file.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+
+	// 保留上一份配置作为备份，手工改坏时还能找回。
+	// 只在正式文件存在时备份，失败不影响保存本身。
+	if _, statErr := os.Stat(path); statErr == nil {
+		_ = copyFile(path, path+".bak")
+	}
+
+	return replaceFile(tmp, path)
+}
+
+// copyFile 复制文件内容，用于保留配置备份。
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, data, 0o644)
 }
 
 // ---------------------------------------------------------------- 程序配置

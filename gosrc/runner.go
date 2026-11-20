@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -182,16 +183,46 @@ func (r *Runner) appendLog(line string) {
 	r.log.WriteString(line)
 	r.log.WriteByte('\n')
 	if r.log.Len() > maxLogChars {
-		// 超出上限时丢弃前半段，避免长跑程序把内存吃光。
-		text := r.log.String()
-		r.log.Reset()
-		r.log.WriteString(text[len(text)/2:])
+		trimLogByLines(&r.log)
 	}
 	callback := r.OnLog
 	r.mu.Unlock()
 	if callback != nil {
 		callback(r, line)
 	}
+}
+
+// trimLogByLines 丢弃前半段日志，保留后半段。
+//
+// 按行边界切分而不是按字节：中文是多字节 UTF-8，直接按字节切
+// 会从字符中间截断，留下乱码。同时保证不会把一行切成两半。
+func trimLogByLines(log *strings.Builder) {
+	text := log.String()
+	half := len(text) / 2
+	// 从目标位置往后找最近的换行，确保从行首开始保留。
+	if idx := strings.IndexByte(text[half:], '\n'); idx >= 0 {
+		half += idx + 1
+	} else {
+		// 找不到换行说明只有一行超长内容，退化为按字节截断，
+		// 但要把切点回退到 UTF-8 字符边界。
+		half = utf8SafeCut(text, half)
+	}
+	log.Reset()
+	log.WriteString(text[half:])
+}
+
+// utf8SafeCut 把切点回退到合法的 UTF-8 字符起始位置。
+func utf8SafeCut(text string, cut int) int {
+	if cut <= 0 {
+		return 0
+	}
+	if cut >= len(text) {
+		return len(text)
+	}
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return cut
 }
 
 // Start 启动程序。fromRestart 为 true 表示自动重启，此时不清除停止标记。

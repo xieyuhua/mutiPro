@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"image"
 	"image/color"
@@ -9,17 +10,24 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 )
 
 const (
 	runKeyPath   = `Software\Microsoft\Windows\CurrentVersion\Run`
 	runValueName = "MultiPro"
 )
+
+// windowTitle 同时用于窗口标题和「找到已有实例」的查找依据，
+// 两处必须保持一致。
+const windowTitle = "MultiPro 通用程序管理器"
 
 // AppDir 返回程序所在目录。被管理的程序按此目录解析相对路径。
 func AppDir() string {
@@ -341,4 +349,223 @@ func clearIconCache() {
 	iconCacheMu.Lock()
 	iconCache = map[string]walk.Image{}
 	iconCacheMu.Unlock()
+}
+
+// ---------------------------------------------------------------- 单实例
+
+const singleInstanceMutexName = `Local\MultiPro.SingleInstance`
+
+var singleInstanceHandle windows.Handle
+
+// acquireSingleInstance 确保同一时间只有一个 MultiPro 在运行。
+//
+// 多开会让两个实例各自拉起同一批程序，造成端口冲突和重复重启。
+// 已有实例时返回 false，调用方应激活它并退出。
+//
+// 用 Local\ 命名空间而不是 Global\：同一用户会话内唯一即可，
+// 也避免不同用户之间互相干扰。
+//
+// 注意不能直接用 x/sys 的 windows.CreateMutex：它只在句柄无效时
+// 返回 error，而「已存在」的情况下句柄依然有效，错误码需要通过
+// GetLastError 读取，且必须在调用后立刻取值。这里直接用 Syscall
+// 拿到 errno，避免中间有其他调用覆盖它。
+func acquireSingleInstance() bool {
+	name, err := windows.UTF16PtrFromString(singleInstanceMutexName)
+	if err != nil {
+		return true // 极端情况下不要因为锁失败而无法启动
+	}
+	procCreateMutex := windows.NewLazySystemDLL("kernel32.dll").NewProc("CreateMutexW")
+	ret, _, callErr := procCreateMutex.Call(0, 0, uintptr(unsafe.Pointer(name)))
+	handle := windows.Handle(ret)
+	if handle == 0 {
+		return true
+	}
+	if errno, ok := callErr.(syscall.Errno); ok && errno == windows.ERROR_ALREADY_EXISTS {
+		windows.CloseHandle(handle)
+		return false
+	}
+	singleInstanceHandle = handle
+	return true
+}
+
+// releaseSingleInstance 释放命名 Mutex。
+func releaseSingleInstance() {
+	if singleInstanceHandle != 0 {
+		windows.CloseHandle(singleInstanceHandle)
+		singleInstanceHandle = 0
+	}
+}
+
+// activateExistingInstance 把已经运行的主窗口带到前台。
+// 找不到窗口时返回 false。
+func activateExistingInstance() bool {
+	title, err := windows.UTF16PtrFromString(windowTitle)
+	if err != nil {
+		return false
+	}
+	hwnd := win.FindWindow(nil, title)
+	if hwnd == 0 {
+		return false
+	}
+	win.ShowWindow(hwnd, win.SW_RESTORE)
+	win.SetForegroundWindow(hwnd)
+	return true
+}
+
+// acquireSingleInstanceWithRetry 在超时时间内反复尝试获取单实例锁。
+// 提权重启时旧进程需要一点时间释放 Mutex，直接失败会误报「已在运行」。
+func acquireSingleInstanceWithRetry(timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if acquireSingleInstance() {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+}
+
+// ---------------------------------------------------------------- 文件替换
+
+// replaceFile 用 src 覆盖 dst，尽力保证原子性。
+//
+// Windows 上 os.Rename 无法覆盖已存在的文件，因此用 MoveFileEx 的
+// REPLACE_EXISTING 语义；失败时退回「删除后重命名」。
+func replaceFile(src, dst string) error {
+	srcPtr, err := windows.UTF16PtrFromString(src)
+	if err != nil {
+		return err
+	}
+	dstPtr, err := windows.UTF16PtrFromString(dst)
+	if err != nil {
+		return err
+	}
+	if err := windows.MoveFileEx(srcPtr, dstPtr, windows.MOVEFILE_REPLACE_EXISTING); err == nil {
+		return nil
+	}
+	// 目标被占用等情况下退回两步操作。
+	if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Rename(src, dst)
+}
+
+// ---------------------------------------------------------------- 窗口状态
+
+// windowState 记录窗口的位置与大小，下次启动时恢复。
+// 单独存一个文件，避免和可手工编辑的 config.json 混在一起。
+type windowState struct {
+	X           int  `json:"x"`
+	Y           int  `json:"y"`
+	Width       int  `json:"width"`
+	Height      int  `json:"height"`
+	Maximized   bool `json:"maximized"`
+}
+
+func windowStatePath() (string, error) {
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "window.json"), nil
+}
+
+// loadWindowState 读取上次的窗口位置，失败时返回 nil。
+func loadWindowState() *windowState {
+	path, err := windowStatePath()
+	if err != nil {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var state windowState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return nil
+	}
+	return &state
+}
+
+// saveWindowState 记录当前窗口位置。
+//
+// 用 GetWindowPlacement 而不是 GetWindowRect：前者能同时拿到
+// 「最大化之前的大小」（RcNormalPosition）和当前显示状态，
+// 这样最大化的窗口下次仍能以原尺寸还原。
+func saveWindowState(mw *walk.MainWindow) {
+	if mw == nil || mw.IsDisposed() {
+		return
+	}
+	path, err := windowStatePath()
+	if err != nil {
+		return
+	}
+
+	var placement win.WINDOWPLACEMENT
+	placement.Length = uint32(unsafe.Sizeof(placement))
+	if !win.GetWindowPlacement(mw.Handle(), &placement) {
+		return
+	}
+
+	// 最小化时 RcNormalPosition 仍然是正确的位置，可以正常记录。
+	rc := placement.RcNormalPosition
+	state := windowState{
+		X:         int(rc.Left),
+		Y:         int(rc.Top),
+		Width:     int(rc.Right - rc.Left),
+		Height:    int(rc.Bottom - rc.Top),
+		Maximized: placement.ShowCmd == win.SW_SHOWMAXIMIZED,
+	}
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, raw, 0o644)
+}
+
+// applyWindowState 恢复上次的窗口位置。位置无效时保持默认居中。
+func applyWindowState(mw *walk.MainWindow, state *windowState) {
+	if mw == nil || !validWindowState(state) {
+		return
+	}
+	_ = mw.SetBoundsPixels(walk.Rectangle{
+		X: state.X, Y: state.Y, Width: state.Width, Height: state.Height,
+	})
+	if state.Maximized {
+		var placement win.WINDOWPLACEMENT
+		placement.Length = uint32(unsafe.Sizeof(placement))
+		if win.GetWindowPlacement(mw.Handle(), &placement) {
+			placement.ShowCmd = win.SW_SHOWMAXIMIZED
+			placement.RcNormalPosition = win.RECT{
+				Left:   int32(state.X),
+				Top:    int32(state.Y),
+				Right:  int32(state.X + state.Width),
+				Bottom: int32(state.Y + state.Height),
+			}
+			win.SetWindowPlacement(mw.Handle(), &placement)
+		}
+	}
+}
+
+// validWindowState 校验记录的位置是否仍然可见。
+// 换了显示器或分辨率变小时，旧坐标可能落在屏幕外。
+func validWindowState(state *windowState) bool {
+	if state == nil || state.Width < 640 || state.Height < 480 {
+		return false
+	}
+	screenW := int(win.GetSystemMetrics(win.SM_CXSCREEN))
+	screenH := int(win.GetSystemMetrics(win.SM_CYSCREEN))
+	if screenW <= 0 || screenH <= 0 {
+		return false
+	}
+	// 窗口标题栏至少要有一部分留在屏幕内。
+	if state.X < -state.Width+100 || state.X > screenW-100 {
+		return false
+	}
+	if state.Y < -50 || state.Y > screenH-100 {
+		return false
+	}
+	return true
 }

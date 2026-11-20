@@ -16,7 +16,12 @@ import (
 	"github.com/lxn/win"
 )
 
+// maxLogUICchars 限制日志控件里保留的字符数，避免长跑后界面变卡。
+const maxLogUICchars = 120000
+
 // crashLog 把启动期错误写入文件，避免 GUI 程序闪退后无从排查。
+// crashLog 把启动期错误写入文件，避免 GUI 程序闪退后无从排查。
+// 使用 UTF-8 编码；用记事本或 VS Code 打开即可正常显示中文。
 func crashLog(format string, args ...interface{}) {
 	f, err := os.OpenFile(filepath.Join(os.TempDir(), "multipro-crash.log"),
 		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
@@ -204,8 +209,10 @@ type mainWindow struct {
 	runners []*Runner
 	current *Runner
 
-	exiting bool
+	exiting       bool
 	trayHintShown bool
+	// windowSaveTimer 用于合并窗口位置变化后的写盘操作。
+	windowSaveTimer *time.Timer
 }
 
 func main() {
@@ -216,6 +223,20 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+	// 单实例：多开会让两个实例各自拉起同一批程序，造成端口冲突。
+	// 提权重启时旧实例会先退出，这里等一下再尝试获取锁。
+	if !acquireSingleInstanceWithRetry(3 * time.Second) {
+		if activateExistingInstance() {
+			crashLog("已有实例在运行，已激活其窗口")
+		} else {
+			walk.MsgBox(nil, windowTitle,
+				"已经有一个 MultiPro 在运行，请使用任务栏或托盘中的窗口。",
+				walk.MsgBoxIconInformation)
+		}
+		os.Exit(0)
+	}
+	defer releaseSingleInstance()
+
 	w := &mainWindow{app: loadConfig()}
 	if err := w.buildUI(); err != nil {
 		crashLog("buildUI: %v", err)
@@ -224,6 +245,9 @@ func main() {
 	}
 	w.buildRunners()
 	w.buildTray()
+
+	// 恢复上次的窗口位置（首次启动或无有效记录时保持默认居中）。
+	applyWindowState(w.mw, loadWindowState())
 
 	w.applyAutoStartFromConfig()
 	w.refreshDetail()
@@ -255,7 +279,7 @@ func (w *mainWindow) buildUI() error {
 
 	err := dcl.MainWindow{
 		AssignTo: mw,
-		Title:    "MultiPro 通用程序管理器",
+		Title:    windowTitle,
 		Icon:     appIcon(),
 		MinSize:  dcl.Size{Width: 940, Height: 640},
 		Size:     dcl.Size{Width: 1060, Height: 720},
@@ -430,7 +454,13 @@ func (w *mainWindow) buildUI() error {
 	w.mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
 		w.onClosing(canceled)
 	})
-	w.mw.SizeChanged().Attach(func() { w.updateStatusBar() })
+	w.mw.SizeChanged().Attach(func() {
+		w.updateStatusBar()
+		w.scheduleWindowStateSave()
+	})
+	w.mw.BoundsChanged().Attach(func() {
+		w.scheduleWindowStateSave()
+	})
 
 	// 默认停留在「运行日志」页；状态页排在第二个。
 	_ = w.tabs.SetCurrentIndex(0)
@@ -654,6 +684,14 @@ func (w *mainWindow) appendLogLine(line string) {
 		int(lineCount)-int(firstVisible) <= visibleLines+1
 
 	w.logEdit.AppendText(time.Now().Format("15:04:05") + "  " + line + "\r\n")
+
+	// 控件里的文本会随运行时间无限增长，长跑之后滚动和重绘都会变慢。
+	// 超过上限时删掉前 1/4，保留最近的内容。
+	if length := w.logEdit.TextLength(); length > maxLogUICchars {
+		keep := length - maxLogUICchars/2
+		w.logEdit.SetTextSelection(0, keep)
+		w.logEdit.ReplaceSelectedText("", false)
+	}
 
 	if atBottom {
 		w.logEdit.SendMessage(win.EM_SETSEL, 0x7FFFFFFF, 0x7FFFFFFF)
@@ -1304,6 +1342,9 @@ func (w *mainWindow) exitApplication() {
 			return
 		}
 	}
+	// 退出前记录窗口位置，下次启动时恢复。
+	saveWindowState(w.mw)
+
 	for _, r := range w.runners {
 		r.Kill()
 	}
@@ -1344,6 +1385,7 @@ func (w *mainWindow) onClosing(canceled *bool) {
 		}
 	}
 	w.exiting = true
+	saveWindowState(w.mw)
 	for _, r := range w.runners {
 		r.Kill()
 	}
@@ -1497,4 +1539,18 @@ func execCommand(name string, args ...string) error {
 // 对 Windows 程序来说 Go 会重新拼回原始命令行，因此这里只需简单按空白拆分。
 func splitArgs(line string) []string {
 	return strings.Fields(line)
+}
+
+// scheduleWindowStateSave 在窗口位置变化后延迟保存。
+//
+// 拖动窗口会连续触发大量事件，直接写盘过于频繁；因此合并成
+// 一次延迟写入。这样即使程序被强制结束（任务管理器、断电），
+// 也能保留最近一次的位置。
+func (w *mainWindow) scheduleWindowStateSave() {
+	if w.windowSaveTimer != nil {
+		w.windowSaveTimer.Stop()
+	}
+	w.windowSaveTimer = time.AfterFunc(800*time.Millisecond, func() {
+		w.uiAsync(func() { saveWindowState(w.mw) })
+	})
 }
