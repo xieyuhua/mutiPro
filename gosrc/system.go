@@ -374,8 +374,20 @@ func acquireSingleInstance() bool {
 	if err != nil {
 		return true // 极端情况下不要因为锁失败而无法启动
 	}
+
+	// bInheritHandle 必须为 false。
+	//
+	// 否则 Mutex 句柄会被 exec.Cmd 启动的子进程继承：MultiPro 退出后
+	// 那些被管理的程序仍在运行，句柄不释放，下次启动就会误判
+	// 「已有实例在运行」而直接退出。
+	attrs := &windows.SecurityAttributes{
+		Length:        uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		InheritHandle: 0,
+	}
+
 	procCreateMutex := windows.NewLazySystemDLL("kernel32.dll").NewProc("CreateMutexW")
-	ret, _, callErr := procCreateMutex.Call(0, 0, uintptr(unsafe.Pointer(name)))
+	ret, _, callErr := procCreateMutex.Call(uintptr(unsafe.Pointer(attrs)), 0,
+		uintptr(unsafe.Pointer(name)))
 	handle := windows.Handle(ret)
 	if handle == 0 {
 		return true

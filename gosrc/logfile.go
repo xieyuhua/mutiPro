@@ -61,11 +61,117 @@ func newLogWriter(programName string, keepDays int, enabled bool) *logWriter {
 
 // logDir 返回日志根目录。
 func logDir() (string, error) {
+	// 日志放在程序所在目录，便于随程序一起备份或迁移。
+	// 程序目录可能不可写（放在 Program Files 下），此时退回用户配置目录。
+	primary := filepath.Join(AppDir(), "logs")
+	if err := os.MkdirAll(primary, 0o755); err == nil {
+		if probeWrite(primary) {
+			migrateLegacyLogs(primary)
+			return primary, nil
+		}
+	}
 	base, err := configDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "logs"), nil
+	fallback := filepath.Join(base, "logs")
+	if err := os.MkdirAll(fallback, 0o755); err != nil {
+		return "", err
+	}
+	return fallback, nil
+}
+
+// migrateLegacyLogs 把旧版本写在配置目录下的日志搬到新位置。
+//
+// 旧版本使用 %APPDATA%\MultiPro\logs，升级后日志改到程序目录，
+// 不迁移会让历史日志看起来「消失」。
+//
+// 配置文件在 C: 而程序可能在别的盘，os.Rename 跨卷会失败，
+// 因此失败时退回「逐个文件复制 + 删除」。
+func migrateLegacyLogs(target string) {
+	base, err := configDir()
+	if err != nil {
+		return
+	}
+	legacy := filepath.Join(base, "logs")
+	if legacy == target {
+		return
+	}
+	if _, err := os.Stat(legacy); err != nil {
+		return
+	}
+
+	// 逐层搬运：旧目录下每个程序一个子目录。
+	programs, err := os.ReadDir(legacy)
+	if err != nil {
+		return
+	}
+	for _, program := range programs {
+		srcDir := filepath.Join(legacy, program.Name())
+		dstDir := filepath.Join(target, program.Name())
+
+		if !program.IsDir() {
+			// 根目录下的散落文件直接搬。
+			moveFile(srcDir, filepath.Join(target, program.Name()))
+			continue
+		}
+		if err := os.MkdirAll(dstDir, 0o755); err != nil {
+			continue
+		}
+		files, err := os.ReadDir(srcDir)
+		if err != nil {
+			continue
+		}
+		for _, file := range files {
+			if file.IsDir() {
+				continue
+			}
+			moveFile(filepath.Join(srcDir, file.Name()), filepath.Join(dstDir, file.Name()))
+		}
+		// 源目录空了就删掉。
+		if remaining, err := os.ReadDir(srcDir); err == nil && len(remaining) == 0 {
+			_ = os.Remove(srcDir)
+		}
+	}
+	// 旧根目录空了才删除，避免误删搬运失败的文件。
+	if remaining, err := os.ReadDir(legacy); err == nil && len(remaining) == 0 {
+		_ = os.Remove(legacy)
+	}
+}
+
+// moveFile 优先用重命名（同卷时瞬时完成），跨卷失败时改为复制后删除。
+// 目标已存在时不覆盖，避免丢掉新日志。
+func moveFile(src, dst string) {
+	if _, err := os.Stat(dst); err == nil {
+		return
+	}
+	if err := os.Rename(src, dst); err == nil {
+		return
+	}
+	// 跨卷：复制内容后删除源文件。
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(dst, data, 0o644); err != nil {
+		// 复制失败时删掉半成品，保留源文件。
+		_ = os.Remove(dst)
+		return
+	}
+	_ = os.Remove(src)
+}
+
+// probeWrite 检查目录是否真的可写。
+// 仅判断 MkdirAll 成功不够：目录可能存在但当前用户没有写权限。
+func probeWrite(dir string) bool {
+	probe := filepath.Join(dir, ".write-probe")
+	file, err := os.OpenFile(probe, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return false
+	}
+	file.Close()
+	_ = os.Remove(probe)
+	return true
 }
 
 // sanitizeName 把程序名转成合法目录名。
