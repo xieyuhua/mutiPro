@@ -42,6 +42,9 @@ type editDialog struct {
 	txtNotifyWebhook  *walk.LineEdit
 	cmbNotifyPlatform *walk.ComboBox
 
+	cmbHangMode    *walk.ComboBox
+	numHangTimeout *walk.NumberEdit
+
 	// 启动/停止各只有一个输入框，内容可以是 HH:MM 或 cron。
 	txtSchedStart *walk.LineEdit
 	txtSchedStop  *walk.LineEdit
@@ -61,6 +64,37 @@ var modeOptions = []string{
 	"以 PowerShell 运行（.ps1）",
 	"以 Python 运行（.py）",
 	"以 Node.js 运行（.js）",
+}
+
+// hangModeOptions 对应 ProgramConfig.HangMode 的三种状态。
+var hangModeOptions = []string{
+	"跟随全局设置",
+	"启用",
+	"关闭",
+}
+
+// hangModeIndex 把配置值映射到下拉框索引。
+func hangModeIndex(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "on":
+		return 1
+	case "off":
+		return 2
+	default:
+		return 0
+	}
+}
+
+// hangModeValue 把下拉框索引转回配置值。
+func hangModeValue(index int) string {
+	switch index {
+	case 1:
+		return "on"
+	case 2:
+		return "off"
+	default:
+		return ""
+	}
 }
 
 // notifyPlatformIndex 把平台标识映射到下拉框索引。
@@ -366,6 +400,45 @@ func (d *editDialog) build(owner walk.Form) error {
 										AssignTo:     &d.cmbNotifyPlatform,
 										Model:        []string{"跟随全局", "企业微信", "钉钉"},
 										CurrentIndex: notifyPlatformIndex(d.cfg.NotifyPlatform),
+									},
+								},
+							},
+						},
+					},
+
+					// ---- 卡死检测 ----
+					dcl.GroupBox{
+						Title:  "卡死检测",
+						Layout: dcl.VBox{Spacing: 3, Alignment: dcl.AlignHNearVNear},
+						Children: []dcl.Widget{
+							dcl.Label{
+								Text: "进程长时间没有日志输出会被判定为无响应。" +
+									"完全不输出日志的程序请选择「关闭」。",
+								TextColor: walk.RGB(100, 116, 139),
+							},
+							dcl.Composite{
+								Layout: dcl.Grid{Columns: 2, Spacing: 6},
+								Children: []dcl.Widget{
+									dcl.Label{Text: "检测方式"},
+									dcl.ComboBox{
+										AssignTo:     &d.cmbHangMode,
+										Model:        hangModeOptions,
+										CurrentIndex: hangModeIndex(d.cfg.HangMode),
+									},
+									dcl.Label{Text: "超时（分钟）"},
+									dcl.Composite{
+										Layout: dcl.HBox{Spacing: 6, MarginsZero: true},
+										Children: []dcl.Widget{
+											dcl.NumberEdit{
+												AssignTo:           &d.numHangTimeout,
+												Value:              float64(d.cfg.HangTimeoutMin),
+												MinValue:           0,
+												MaxValue:           1440,
+												SpinButtonsVisible: true,
+												MaxSize:            dcl.Size{Width: 110},
+											},
+											dcl.Label{Text: "0 表示跟随全局"},
+										},
 									},
 								},
 							},
@@ -682,6 +755,9 @@ func (d *editDialog) collect() {
 
 	d.cfg.NotifyWebhook = strings.TrimSpace(d.txtNotifyWebhook.Text())
 	d.cfg.NotifyPlatform = notifyPlatformValue(d.cmbNotifyPlatform.CurrentIndex())
+
+	d.cfg.HangMode = hangModeValue(d.cmbHangMode.CurrentIndex())
+	d.cfg.HangTimeoutMin = int(d.numHangTimeout.Value())
 
 	// 统一格式：HH:MM 规范成两位数，cron 原样保留（压缩多余空格）。
 	d.cfg.ScheduleStart = normalizeScheduleText(d.txtSchedStart.Text())

@@ -207,9 +207,13 @@ func (d *notifyDialog) build(owner walk.Form) error {
 				Children: []dcl.Widget{
 					dcl.CheckBox{
 						AssignTo:         &d.chkHang,
-						Text:             "启用卡死检测",
+						Text:             "全局默认启用卡死检测",
 						Checked:          *d.hangDetect,
 						OnCheckedChanged: func() { d.updateEnabled() },
+					},
+					dcl.Label{
+						Text: "这里只是默认值；每个程序可在「编辑 → 卡死检测」里单独设为启用或关闭。",
+						TextColor: walk.RGB(148, 163, 184),
 					},
 					dcl.Composite{
 						Layout: dcl.HBox{Spacing: 6, MarginsZero: true},

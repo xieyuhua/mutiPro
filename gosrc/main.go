@@ -1531,17 +1531,18 @@ func (w *mainWindow) runSchedules() {
 // 进程还活着但不再产生任何日志，通常意味着死锁、卡在 IO 或
 // 内部循环空转。判定后发通知，并按配置重启。
 func (w *mainWindow) runHangDetection() {
-	if !w.app.HangDetect {
-		return
-	}
-	timeout := time.Duration(w.app.HangTimeoutMin) * time.Minute
 	now := time.Now()
 	for _, r := range w.runners {
+		enabled, timeout := w.hangSettingsFor(r.Config())
+		if !enabled {
+			continue
+		}
 		if !r.CheckHang(timeout, now) {
 			continue
 		}
-		message := fmt.Sprintf("已 %d 分钟没有日志输出，判定为无响应",
-			w.app.HangTimeoutMin)
+
+		minutes := int(timeout.Minutes())
+		message := fmt.Sprintf("已 %d 分钟没有日志输出，判定为无响应", minutes)
 		r.appendLog("=== " + message)
 		w.pushNotify(r, EventHung, message)
 
@@ -1558,6 +1559,32 @@ func (w *mainWindow) runHangDetection() {
 			}(r)
 		}
 	}
+}
+
+// hangSettingsFor 解析某个程序实际生效的卡死检测设置。
+//
+// 优先级：程序显式配置 > 全局默认。完全不输出日志的程序
+// （纯 GUI 常驻、按事件触发的守护进程）需要在程序里设成 off，
+// 否则会被误判并反复重启。
+func (w *mainWindow) hangSettingsFor(cfg *ProgramConfig) (enabled bool, timeout time.Duration) {
+	timeoutMin := w.app.HangTimeoutMin
+	if cfg.HangTimeoutMin > 0 {
+		timeoutMin = cfg.HangTimeoutMin
+	}
+
+	switch strings.ToLower(strings.TrimSpace(cfg.HangMode)) {
+	case "on":
+		enabled = true
+	case "off":
+		enabled = false
+	default:
+		enabled = w.app.HangDetect
+	}
+
+	if timeoutMin <= 0 {
+		timeoutMin = 10
+	}
+	return enabled, time.Duration(timeoutMin) * time.Minute
 }
 
 // appendSchedLog 把调度动作写进当前程序的日志页。

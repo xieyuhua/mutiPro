@@ -500,3 +500,70 @@ func TestNotifyCooldownKeying(t *testing.T) {
 		t.Error("超过冷却期应再次发送")
 	}
 }
+
+// ---------------------------------------------------------------- 卡死检测配置
+
+// TestHangSettingsPriority 验证「程序配置 > 全局默认」的优先级。
+func TestHangSettingsPriority(t *testing.T) {
+	w := &mainWindow{app: &AppConfig{
+		HangDetect:     true,
+		HangTimeoutMin: 10,
+	}}
+
+	// 跟随全局：全局开启时启用，用全局阈值。
+	if enabled, timeout := w.hangSettingsFor(&ProgramConfig{}); !enabled || timeout != 10*time.Minute {
+		t.Errorf("跟随全局 => %v %v", enabled, timeout)
+	}
+	// 程序显式开启，即使全局关闭也启用。
+	if enabled, _ := w.hangSettingsFor(&ProgramConfig{HangMode: "on"}); !enabled {
+		t.Error("程序设为 on 时应启用")
+	}
+	// 程序显式关闭，即使全局开启也禁用。
+	if enabled, _ := w.hangSettingsFor(&ProgramConfig{HangMode: "off"}); enabled {
+		t.Error("程序设为 off 时应禁用")
+	}
+	// 程序覆盖阈值。
+	if _, timeout := w.hangSettingsFor(&ProgramConfig{HangTimeoutMin: 3}); timeout != 3*time.Minute {
+		t.Errorf("阈值覆盖失败：%v", timeout)
+	}
+
+	// 全局关闭时，跟随全局的程序应禁用。
+	w.app.HangDetect = false
+	if enabled, _ := w.hangSettingsFor(&ProgramConfig{}); enabled {
+		t.Error("全局关闭后跟随的程序应禁用")
+	}
+	if enabled, _ := w.hangSettingsFor(&ProgramConfig{HangMode: "on"}); !enabled {
+		t.Error("全局关闭时程序显式 on 仍应启用")
+	}
+}
+
+// TestHangTimeoutFallback 验证阈值异常时回退到 10 分钟。
+func TestHangTimeoutFallback(t *testing.T) {
+	w := &mainWindow{app: &AppConfig{HangDetect: true, HangTimeoutMin: 0}}
+	if _, timeout := w.hangSettingsFor(&ProgramConfig{}); timeout != 10*time.Minute {
+		t.Errorf("全局阈值 0 时应回退 10 分钟，得到 %v", timeout)
+	}
+	w.app.HangTimeoutMin = -5
+	if _, timeout := w.hangSettingsFor(&ProgramConfig{}); timeout != 10*time.Minute {
+		t.Errorf("负数阈值应回退 10 分钟，得到 %v", timeout)
+	}
+}
+
+// TestHangModeNormalize 验证非法的 HangMode 被规范成「跟随全局」。
+func TestHangModeNormalize(t *testing.T) {
+	cases := map[string]string{
+		"on": "on", "ON": "on", " on ": "on",
+		"off": "off", "OFF": "off",
+		"":     "",
+		"yes":  "",
+		"true": "",
+		"xxx":  "",
+	}
+	for in, want := range cases {
+		p := &ProgramConfig{HangMode: in}
+		normalizeProgram(p)
+		if p.HangMode != want {
+			t.Errorf("%q => %q, want %q", in, p.HangMode, want)
+		}
+	}
+}

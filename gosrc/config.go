@@ -67,6 +67,16 @@ type ProgramConfig struct {
 	NotifyWebhook string `json:"notifyWebhook"`
 	// NotifyPlatform 覆盖全局平台（wecom / ding）；留空则跟随全局。
 	NotifyPlatform string `json:"notifyPlatform"`
+
+	// HangMode 控制该程序的卡死检测：
+	//
+	//	""（空）跟随全局；"on" 强制启用；"off" 强制禁用
+	//
+	// 完全不输出日志的程序（纯 GUI 常驻、按事件触发的守护进程）需要
+	// 显式关掉，否则会被误判为无响应并反复重启。
+	HangMode string `json:"hangMode"`
+	// HangTimeoutMin 覆盖全局阈值；0 表示跟随全局。
+	HangTimeoutMin int `json:"hangTimeoutMin"`
 }
 
 // 脚本执行方式。
@@ -306,6 +316,13 @@ func normalizeProgram(p *ProgramConfig) {
 	}
 	if p.ScriptMode == "" {
 		p.ScriptMode = ModeAuto
+	}
+	// 卡死检测模式只接受三个值，其他一律视为「跟随全局」。
+	switch strings.ToLower(strings.TrimSpace(p.HangMode)) {
+	case "on", "off":
+		p.HangMode = strings.ToLower(strings.TrimSpace(p.HangMode))
+	default:
+		p.HangMode = ""
 	}
 	// 迁移旧配置：以前把 HH:MM 和 cron 分成两个字段，cron 优先。
 	// 现在合并成一个字段，cron 若有值就覆盖简单时间，然后清空旧字段。
