@@ -879,29 +879,35 @@ func (r *Runner) runDetached(cfg *ProgramConfig, args string, timeoutMs int) err
 }
 
 // runDetachedOutput 执行一次性命令并返回合并输出；超时杀进程并返回错误。
+//
+// 脚本程序（.py/.ps1/.js 等）不能直接执行脚本文件，探测与停止命令
+// 必须像主进程一样通过解释器包装，否则必然失败。
 func (r *Runner) runDetachedOutput(cfg *ProgramConfig, args string, timeoutMs int) (string, error) {
-	exePath := cfg.resolveExePath(AppDir())
-	if exePath == "" || !isFile(exePath) {
-		return "", errors.New("找不到程序文件：" + exePath)
+	launchExe, commandLine, err := cfg.WrapCommand(args)
+	if err != nil {
+		return "", err
+	}
+	if launchExe == "" {
+		return "", errors.New("空命令")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(timeoutMs)*time.Millisecond)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, exePath)
+	cmd := exec.CommandContext(ctx, launchExe)
 	cmd.Dir = cfg.resolveWorkDir(AppDir())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow: true,
-		CmdLine:    args,
+		CmdLine:    commandLine,
 	}
 	var buffer bytes.Buffer
 	cmd.Stdout = &buffer
 	cmd.Stderr = &buffer
-	err := cmd.Run()
+	runErr := cmd.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return "", errors.New("查询超时")
 	}
-	return buffer.String(), err
+	return buffer.String(), runErr
 }
 
 // ---------------------------------------------------------------- 进程辅助

@@ -20,30 +20,41 @@ func TestNotifyConfigWants(t *testing.T) {
 
 	// 默认只开崩溃/启动失败/卡死，定时任务默认关闭。
 	cfg.Enabled = true
-	if !cfg.wants(EventCrash) {
+	if !cfg.wants(EventCrash, nil) {
 		t.Error("崩溃应默认通知")
 	}
-	if !cfg.wants(EventStartFailed) {
+	if !cfg.wants(EventStartFailed, nil) {
 		t.Error("启动失败应默认通知")
 	}
-	if !cfg.wants(EventHung) {
+	if !cfg.wants(EventHung, nil) {
 		t.Error("卡死应默认通知")
 	}
-	if cfg.wants(EventScheduled) {
+	if cfg.wants(EventScheduled, nil) {
 		t.Error("定时任务默认不应通知（过于频繁）")
 	}
 
 	// 总开关关闭时任何事件都不发。
 	cfg.Enabled = false
-	if cfg.wants(EventCrash) {
+	if cfg.wants(EventCrash, nil) {
 		t.Error("总开关关闭后不应通知")
 	}
 
 	// 没有 Webhook 也不应尝试发送。
 	cfg.Enabled = true
 	cfg.Webhook = ""
-	if cfg.wants(EventCrash) {
+	if cfg.wants(EventCrash, nil) {
 		t.Error("没有 Webhook 时不应通知")
+	}
+
+	// 全局为空但程序配置了专属地址：应该能发。
+	// 修复前 wants() 只看全局地址，导致单程序覆盖完全失效。
+	custom := &ProgramConfig{NotifyWebhook: "https://custom.example.com/hook"}
+	if !cfg.wants(EventCrash, custom) {
+		t.Error("全局为空时程序专属 Webhook 应生效")
+	}
+	// 全局为空、程序也没配：不能发。
+	if cfg.wants(EventCrash, &ProgramConfig{}) {
+		t.Error("两处都没有地址时不应通知")
 	}
 }
 

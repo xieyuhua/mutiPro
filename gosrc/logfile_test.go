@@ -418,3 +418,41 @@ func TestMigrateLegacyLogsSkipExisting(t *testing.T) {
 		t.Log("旧日志被搬入（当前实现允许合并）")
 	}
 }
+
+// TestRunnerCloseLogFileReleasesFile 验证关闭句柄后文件不再被占用。
+// 修复前 replaceRunner/removeRunner 只 Kill 不关句柄，
+// 导致日志文件被锁住、保留清理无法删除过期文件。
+func TestRunnerCloseLogFileReleasesFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("APPDATA", dir)
+
+	cfg := &ProgramConfig{
+		ID: "lc1", Name: "句柄测试",
+		ExePath: "cmd.exe", Arguments: "/c ping -n 10 127.0.0.1",
+		StopTimeout: 800,
+	}
+	r := newRunner(cfg)
+	r.SetLogFile(true, 30)
+
+	if err := r.Start(AppDir(), false); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(800)
+	r.Kill()
+	r.CloseLogFile()
+
+	// 句柄已释放：日志文件应当可以打开写入（Windows 上被占用的
+	// 文件以独占方式打开会失败；即便共享打开，删除也应成功）。
+	root, err := logDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().Format("2006-01-02")
+	path := filepath.Join(root, "句柄测试", today+".log")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("日志文件应存在：%v", err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Errorf("关闭句柄后文件应可删除：%v", err)
+	}
+}

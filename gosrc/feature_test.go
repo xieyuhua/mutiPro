@@ -404,3 +404,84 @@ func TestDrawGlyphFallback(t *testing.T) {
 func newTestImage(size int) *image.RGBA {
 	return image.NewRGBA(image.Rect(0, 0, size, size))
 }
+
+// TestWrapCommandExe 验证 exe 程序的独立命令不做包装。
+func TestWrapCommandExe(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "app.exe")
+	os.WriteFile(exe, []byte("x"), 0o644)
+
+	cfg := &ProgramConfig{ExePath: exe}
+	gotExe, gotArgs, err := cfg.WrapCommand("--info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotExe != exe {
+		t.Errorf("exe = %q", gotExe)
+	}
+	if gotArgs != "--info" {
+		t.Errorf("args = %q", gotArgs)
+	}
+}
+
+// TestWrapCommandScript 验证脚本程序的独立命令走解释器。
+// 修复前探测/停止命令直接执行 .py/.ps1 文件，必然失败。
+func TestWrapCommandScript(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "server.py")
+	os.WriteFile(script, []byte("print('hi')"), 0o644)
+
+	cfg := &ProgramConfig{ExePath: script, Arguments: "--port 8080"}
+	gotExe, gotArgs, err := cfg.WrapCommand("--status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 应该调用解释器而不是脚本本身。
+	if !strings.HasSuffix(strings.ToLower(gotExe), ".exe") ||
+		strings.Contains(gotExe, "server.py") {
+		t.Errorf("应返回解释器路径，得到 %q", gotExe)
+	}
+	// 应包含查询命令，但不应包含启动参数 --port 8080。
+	if !strings.Contains(gotArgs, "--status") {
+		t.Errorf("应包含查询命令：%q", gotArgs)
+	}
+	if strings.Contains(gotArgs, "--port 8080") {
+		t.Errorf("独立命令不应拼接启动参数：%q", gotArgs)
+	}
+}
+
+// TestWrapCommandPowershellUsesCommandMode 验证 PowerShell 独立命令用 -Command。
+// -File 只能跑脚本文件，不能执行内联命令。
+func TestWrapCommandPowershellUsesCommandMode(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "task.ps1")
+	os.WriteFile(script, []byte("Write-Host hi"), 0o644)
+
+	cfg := &ProgramConfig{ExePath: script}
+	_, gotArgs, err := cfg.WrapCommand("Get-Process")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(gotArgs, "-Command") {
+		t.Errorf("PowerShell 独立命令应使用 -Command：%q", gotArgs)
+	}
+	if strings.Contains(gotArgs, "-File") {
+		t.Errorf("不应使用 -File：%q", gotArgs)
+	}
+}
+
+func TestWrapCommandEmpty(t *testing.T) {
+	cfg := &ProgramConfig{ExePath: "a.exe"}
+	exe, args, err := cfg.WrapCommand("")
+	if err != nil || exe != "" || args != "" {
+		t.Errorf("空命令应返回空：%q %q %v", exe, args, err)
+	}
+}
+
+// TestWrapCommandMissingFile 验证文件缺失时报错而非静默。
+func TestWrapCommandMissingFile(t *testing.T) {
+	cfg := &ProgramConfig{ExePath: "missing-script.py"}
+	if _, _, err := cfg.WrapCommand("--info"); err == nil {
+		t.Error("脚本文件缺失应返回错误")
+	}
+}

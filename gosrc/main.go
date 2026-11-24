@@ -652,6 +652,8 @@ func (w *mainWindow) replaceRunner(old *Runner, cfg *ProgramConfig) *Runner {
 		return nil
 	}
 	old.Kill()
+	// 日志文件句柄不关闭会一直占用文件，后续清理也会失败。
+	old.CloseLogFile()
 	replacement := w.makeRunner(cfg)
 	w.runners[index] = replacement
 	w.model.replace(index, replacement)
@@ -673,6 +675,7 @@ func (w *mainWindow) removeRunner(target *Runner) {
 		return
 	}
 	target.Kill()
+	target.CloseLogFile()
 	w.runners = append(w.runners[:index], w.runners[index+1:]...)
 	w.model.removeAt(index)
 }
@@ -1922,8 +1925,11 @@ func (w *mainWindow) onRunnerExit(r *Runner, info ExitInfo) {
 // 发送走独立 goroutine 且带超时，网络慢或机器人不可用时
 // 不会拖住界面，也不会影响被管理的程序。
 func (w *mainWindow) pushNotify(r *Runner, event NotifyEvent, detail string) {
-	cfg := &w.app.Notify
-	if !cfg.wants(event) {
+	// 配置快照：用户可能在通知发送过程中修改设置，
+	// goroutine 直接引用全局配置会产生数据竞争。
+	cfg := w.app.Notify
+	program := r.Config()
+	if !cfg.wants(event, program) {
 		return
 	}
 	if w.notifier == nil {
@@ -1933,7 +1939,7 @@ func (w *mainWindow) pushNotify(r *Runner, event NotifyEvent, detail string) {
 	// 冷却去重：崩溃后自动重启的程序会周期性失败，
 	// 每失败一次就发一条会把群刷爆。按「程序 + 事件」分别计时。
 	now := time.Now()
-	key := r.Config().ID + "|" + string(event)
+	key := program.ID + "|" + string(event)
 	if w.notifySentAt == nil {
 		w.notifySentAt = map[string]time.Time{}
 	}
@@ -1945,16 +1951,15 @@ func (w *mainWindow) pushNotify(r *Runner, event NotifyEvent, detail string) {
 	hostname, _ := os.Hostname()
 	msg := NotifyMessage{
 		Event:      event,
-		Program:    r.Config().Name,
+		Program:    program.Name,
 		Detail:     detail,
 		LogTail:    r.LogTail(cfg.LogTailLines),
 		OccurredAt: now,
 		Hostname:   hostname,
 	}
-	program := r.Config()
 
 	go func() {
-		if err := w.notifier.Send(cfg, program, msg); err != nil {
+		if err := w.notifier.Send(&cfg, program, msg); err != nil {
 			// 通知失败只写本地日志，避免影响程序运行。
 			r.appendLog("=== 机器人通知发送失败：" + err.Error())
 		}

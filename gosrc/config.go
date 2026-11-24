@@ -614,6 +614,40 @@ func (p *ProgramConfig) BuildLaunch(baseDir string) (string, string, error) {
 	return interpreterPath, strings.Join(parts, " "), nil
 }
 
+// WrapCommand 用与主程序相同的解释器包装一条独立命令。
+//
+// 探测命令和停止命令对脚本程序不能直接执行脚本文件——它们需要走
+// 解释器。与 BuildLaunch 的区别：这里不拼接启动参数 Arguments，
+// 因为探测/停止是独立的命令，不是启动逻辑的一部分。
+//
+// baseCmd 是已展开占位符的命令内容（如 "--info" 或 "--stop"），
+// 返回最终 exe 与完整命令行。
+func (p *ProgramConfig) WrapCommand(baseCmd string) (string, string, error) {
+	if strings.TrimSpace(baseCmd) == "" {
+		return "", "", nil
+	}
+	if !p.NeedsInterpreter() {
+		return p.resolveExePath(AppDir()), baseCmd, nil
+	}
+
+	exePath := p.resolveExePath(AppDir())
+	if exePath == "" || !isFile(exePath) {
+		return "", "", fmt.Errorf("找不到程序文件：%s", exePath)
+	}
+	interpreterPath, interpreterArgs, err := p.resolveInterpreter()
+	if err != nil {
+		return "", "", err
+	}
+	// PowerShell 的独立命令用 -Command 而不是 -File。
+	if p.EffectiveMode() == ModePowershell && len(interpreterArgs) > 0 {
+		// 替换掉 -File 及其后的脚本占位。
+		interpreterArgs = []string{"-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"}
+	}
+	parts := append([]string{}, interpreterArgs...)
+	parts = append(parts, baseCmd)
+	return interpreterPath, strings.Join(parts, " "), nil
+}
+
 // quoteForCommandLine 对含空格/特殊字符的参数加引号。
 func quoteForCommandLine(s string) string {
 	if s == "" {

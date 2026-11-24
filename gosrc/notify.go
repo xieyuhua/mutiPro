@@ -87,8 +87,16 @@ func defaultNotifyConfig() NotifyConfig {
 }
 
 // wants 判断某事件是否启用推送。
-func (c *NotifyConfig) wants(event NotifyEvent) bool {
-	if !c.Enabled || strings.TrimSpace(c.Webhook) == "" {
+// wants 判断某事件是否启用推送。
+//
+// program 用于解析实际生效的 Webhook：全局地址为空时，
+// 配置了专属地址的程序仍然应该能发送通知。
+func (c *NotifyConfig) wants(event NotifyEvent, program *ProgramConfig) bool {
+	if !c.Enabled {
+		return false
+	}
+	// 实际生效的地址为空时无法投递。
+	if strings.TrimSpace(c.effectiveWebhook(program)) == "" {
 		return false
 	}
 	switch event {
