@@ -18,8 +18,9 @@ type editDialog struct {
 	txtName     *walk.LineEdit
 	txtExe      *walk.LineEdit
 	txtWorkDir  *walk.LineEdit
-	txtArgs     *walk.TextEdit
-	txtArgsList *walk.TextEdit
+	txtArgs         *walk.TextEdit
+	txtArgsList     *walk.TextEdit
+	lblArgsPreview  *walk.Label
 	txtStop     *walk.LineEdit
 	numStop     *walk.NumberEdit
 
@@ -215,6 +216,25 @@ func (d *editDialog) build(owner walk.Form) error {
 								Text:        d.cfg.Arguments,
 								MinSize:     dcl.Size{Height: 70},
 								ToolTipText: "例如 -k {token} -s {server}；{key} 会替换为下方参数表的值",
+							},
+
+							// 展开预览：参数错误（多余分号、占位符拼错）
+							// 在保存前就能发现，而不是启动失败后排查日志。
+							dcl.Label{Text: "展开预览"},
+							dcl.Composite{
+								Layout: dcl.HBox{Spacing: 4, MarginsZero: true},
+								Children: []dcl.Widget{
+									dcl.Label{
+										AssignTo:  &d.lblArgsPreview,
+										Text:      "",
+										TextColor: walk.RGB(100, 116, 139),
+									},
+									dcl.PushButton{
+										Text:      "刷新预览",
+										MinSize:   dcl.Size{Width: 80},
+										OnClicked: func() { d.updateArgsPreview() },
+									},
+								},
 							},
 
 							dcl.Label{Text: "参数表"},
@@ -530,6 +550,11 @@ func (d *editDialog) initAfterCreate() {
 	d.txtSchedStart.TextChanged().Attach(func() { d.updateCronHint() })
 	d.txtSchedStop.TextChanged().Attach(func() { d.updateCronHint() })
 	d.updateCronHint()
+
+	// 参数或参数表变化时自动刷新展开预览。
+	d.txtArgs.TextChanged().Attach(func() { d.updateArgsPreview() })
+	d.txtArgsList.TextChanged().Attach(func() { d.updateArgsPreview() })
+	d.updateArgsPreview()
 }
 
 // updateCronHint 实时解释 cron 表达式，填错能立刻看到原因。
@@ -663,6 +688,46 @@ func (d *editDialog) updateProbeEnabled() {
 	d.numInterval.SetEnabled(enabled)
 	d.txtOKKey.SetEnabled(keyValueMode)
 	d.txtOKValue.SetEnabled(keyValueMode)
+}
+
+// updateArgsPreview 展示占位符替换后的最终命令行。
+//
+// 用户的常见错误在这里一眼可见：值里带了分号、占位符拼错未替换、
+// 缺少必填参数等。提前发现比启动失败后翻日志高效得多。
+func (d *editDialog) updateArgsPreview() {
+	if d.lblArgsPreview == nil {
+		return
+	}
+	// 用临时配置展开，不改动 d.cfg。
+	tmp := d.cfg.clone()
+	tmp.Arguments = d.txtArgs.Text()
+	tmp.Args = parseArgsText(d.txtArgsList.Text())
+
+	expanded := tmp.buildCommandLine()
+	if expanded == "" {
+		_ = d.lblArgsPreview.SetText("（空）")
+		return
+	}
+
+	// 未替换的占位符是拼写错误的信号，标出来。
+	if leftovers := findUnresolvedPlaceholders(expanded); len(leftovers) > 0 {
+		_ = d.lblArgsPreview.SetText(
+			"⚠ 未替换的占位符：" + strings.Join(leftovers, "、") +
+				"　|　" + expanded)
+		return
+	}
+	_ = d.lblArgsPreview.SetText(expanded)
+}
+
+// findUnresolvedPlaceholders 找出展开后仍残留的 {key}。
+func findUnresolvedPlaceholders(text string) []string {
+	var result []string
+	for _, part := range strings.Split(text, "{") {
+		if idx := strings.Index(part, "}"); idx > 0 {
+			result = append(result, "{"+part[:idx]+"}")
+		}
+	}
+	return result
 }
 
 // updateModeHint 根据执行方式给出提示，并决定解释器输入是否可用。

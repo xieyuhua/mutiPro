@@ -411,8 +411,12 @@ func startNormal(r *Runner, exePath, commandLine, workDir string) (*procHandle, 
 	cmd.Dir = workDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow: true,
-		// 传原始命令行，保留用户写的引号，避免二次转义。
-		CmdLine: commandLine,
+		// Windows 的 CreateProcessW 用 CmdLine 解析被启动的程序，
+		// 它必须以程序名开头。只传参数会导致系统把第一个参数
+		// （例如 "-k svip666"）当作可执行文件路径去查找，
+		// 程序表现为「显示帮助后退出」或「parameter -k not found」。
+		// 因此这里始终拼上带引号的程序名前缀。
+		CmdLine: quoteArg(exePath) + buildCmdLineSuffix(commandLine),
 	}
 	cmd.Stdout = &processOutput{runner: r}
 	cmd.Stderr = &processOutput{runner: r}
@@ -420,6 +424,19 @@ func startNormal(r *Runner, exePath, commandLine, workDir string) (*procHandle, 
 		return nil, err
 	}
 	return &procHandle{pid: cmd.Process.Pid, done: make(chan struct{}), cmd: cmd}, nil
+}
+
+// buildCmdLineSuffix 把参数部分拼到程序名后面，保证中间有分隔空格。
+func buildCmdLineSuffix(commandLine string) string {
+	trimmed := strings.TrimSpace(commandLine)
+	if trimmed == "" {
+		return ""
+	}
+	// 程序名已带引号，参数前必须有一个空格分隔。
+	if strings.HasPrefix(trimmed, " ") {
+		return trimmed
+	}
+	return " " + trimmed
 }
 
 // startElevated 以管理员身份启动程序。
@@ -898,7 +915,8 @@ func (r *Runner) runDetachedOutput(cfg *ProgramConfig, args string, timeoutMs in
 	cmd.Dir = cfg.resolveWorkDir(AppDir())
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow: true,
-		CmdLine:    commandLine,
+		// 与 startNormal 相同：CmdLine 必须以程序名开头。
+		CmdLine: quoteArg(launchExe) + buildCmdLineSuffix(commandLine),
 	}
 	var buffer bytes.Buffer
 	cmd.Stdout = &buffer

@@ -485,3 +485,93 @@ func TestWrapCommandMissingFile(t *testing.T) {
 		t.Error("脚本文件缺失应返回错误")
 	}
 }
+
+// TestBuildCmdLineSuffix 验证参数拼接的空格处理。
+// 修复前 CmdLine 只有参数没有程序名前缀，Windows 会把第一个
+// 参数当作可执行文件路径，程序表现为「parameter -k not found」。
+func TestBuildCmdLineSuffix(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"", ""},
+		{"   ", ""},
+		{"-k abc", " -k abc"},
+		{"  -k abc", " -k abc"}, // 前导空格被规整成一个
+	}
+	for _, c := range cases {
+		if got := buildCmdLineSuffix(c.in); got != c.want {
+			t.Errorf("buildCmdLineSuffix(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestStartNormalCmdLineHasProgramName 真实启动验证进程能收到正确参数。
+// 用 cmd 的 %* 回显参数，与 startNormal 的构造方式一致。
+func TestStartNormalCmdLineHasProgramName(t *testing.T) {
+	dir := t.TempDir()
+	bat := filepath.Join(dir, "echoargs.bat")
+	os.WriteFile(bat, []byte("@echo off\r\necho ARGS=[%*]\r\n"), 0o644)
+
+	r := newRunner(&ProgramConfig{
+		ID: "cl1", Name: "cmdline",
+		ExePath: bat, Arguments: "-k tok123 -s host:8004",
+		StopTimeout: 800,
+	})
+	var lines []string
+	r.OnLog = func(_ *Runner, line string) { lines = append(lines, line) }
+
+	if err := r.Start(dir, false); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	deadline := time.Now().Add(6 * time.Second)
+	for time.Now().Before(deadline) &&
+		!strings.Contains(strings.Join(lines, "\n"), "ARGS=[") {
+		time.Sleep(100 * time.Millisecond)
+	}
+	r.Stop()
+	r.Kill()
+
+	output := strings.Join(lines, "\n")
+	if !strings.Contains(output, "tok123") {
+		t.Errorf("子进程未收到参数，输出：%s", output)
+	}
+}
+
+// TestFindUnresolvedPlaceholders 验证占位符检测。
+func TestFindUnresolvedPlaceholders(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"-k abc", nil},
+		{"-k {token}", []string{"{token}"}},
+		{"-k {token} -s {server}", []string{"{token}", "{server}"}},
+		{"{a} {b} {a}", []string{"{a}", "{b}", "{a}"}},
+		{"{unclosed", nil},
+	}
+	for _, c := range cases {
+		got := findUnresolvedPlaceholders(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("%q => %v, want %v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%q => %v, want %v", c.in, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// TestArgsValueWithSemicolon 验证值里的分号会原样进入命令行。
+// 这是文档要说明的用户输入陷阱：参数表值不应带分号。
+func TestArgsValueWithSemicolon(t *testing.T) {
+	cfg := &ProgramConfig{
+		Arguments: "-k {token}",
+		Args:      []ArgItem{{Key: "token", Value: "svip666;"}},
+	}
+	if got := cfg.buildCommandLine(); got != "-k svip666;" {
+		t.Errorf("got %q", got)
+	}
+}
