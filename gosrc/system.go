@@ -1,10 +1,12 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"image"
 	"image/color"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -469,11 +471,11 @@ func replaceFile(src, dst string) error {
 // windowState 记录窗口的位置与大小，下次启动时恢复。
 // 单独存一个文件，避免和可手工编辑的 config.json 混在一起。
 type windowState struct {
-	X           int  `json:"x"`
-	Y           int  `json:"y"`
-	Width       int  `json:"width"`
-	Height      int  `json:"height"`
-	Maximized   bool `json:"maximized"`
+	X         int  `json:"x"`
+	Y         int  `json:"y"`
+	Width     int  `json:"width"`
+	Height    int  `json:"height"`
+	Maximized bool `json:"maximized"`
 }
 
 func windowStatePath() (string, error) {
@@ -591,4 +593,18 @@ func validWindowState(state *windowState) bool {
 // 而失败。
 func beepWarning() {
 	win.MessageBeep(win.MB_ICONWARNING)
+}
+
+// ---------------------------------------------------------------- 随机数
+
+// randInt 返回 [0, n) 范围内的密码学安全随机数。
+func randInt(n int) (int, error) {
+	if n <= 0 {
+		return 0, errors.New("n 必须为正数")
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0, err
+	}
+	return int(v.Int64()), nil
 }

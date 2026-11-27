@@ -91,14 +91,14 @@ const (
 
 // scriptKinds 用于界面展示：扩展名 → 中文说明。
 var scriptKinds = map[string]string{
-	".bat":  "批处理",
-	".cmd":  "批处理",
-	".ps1":  "PowerShell",
-	".py":   "Python",
-	".js":   "Node.js",
-	".vbs":  "VBScript",
-	".sh":   "Shell",
-	".exe":  "可执行文件",
+	".bat": "批处理",
+	".cmd": "批处理",
+	".ps1": "PowerShell",
+	".py":  "Python",
+	".js":  "Node.js",
+	".vbs": "VBScript",
+	".sh":  "Shell",
+	".exe": "可执行文件",
 }
 
 // AppConfig 整体配置：程序列表加全局选项。
@@ -141,6 +141,46 @@ type AppConfig struct {
 	HangAutoRestart bool `json:"hangAutoRestart"`
 	// HangInitialized 用于区分「用户关闭」与「旧配置缺失」。
 	HangInitialized bool `json:"hangInitialized"`
+
+	// Web 管理界面。开启后在局域网内用浏览器访问。
+	WebEnabled bool `json:"webEnabled"`
+	WebPort    int  `json:"webPort"`
+	// WebPassword 是登录密码。为空时说明从未初始化过。
+	WebPassword string `json:"webPassword"`
+	// WebInitialized 区分「用户主动关闭」与「旧配置缺失」。
+	WebInitialized bool `json:"webInitialized"`
+}
+
+// defaultWebPort 是 Web 管理界面的默认端口。
+const defaultWebPort = 7117
+
+// ensureWebPassword 返回登录密码；从未设置过时生成一个随机密码。
+// 调用方负责在生成后保存配置并提示用户。
+func (c *AppConfig) ensureWebPassword() (password string, generated bool) {
+	if strings.TrimSpace(c.WebPassword) != "" {
+		return c.WebPassword, false
+	}
+	c.WebPassword = randomPassword(12)
+	return c.WebPassword, true
+}
+
+// randomPassword 生成 n 位易读的随机密码。
+//
+// 排除了容易混淆的字符（0/O、1/l/I），方便用户在手机或另一台
+// 电脑上手工输入。
+func randomPassword(n int) string {
+	const alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+	buf := make([]byte, n)
+	for i := range buf {
+		v, err := randInt(len(alphabet))
+		if err != nil {
+			// 极端情况下退化为固定字符，仍然比无密码安全。
+			buf[i] = alphabet[i%len(alphabet)]
+			continue
+		}
+		buf[i] = alphabet[v]
+	}
+	return string(buf)
 }
 
 // applyDefaults 为缺失的字段补上默认值。
@@ -176,6 +216,10 @@ func (c *AppConfig) applyDefaults() {
 	}
 	if c.HangTimeoutMin <= 0 {
 		c.HangTimeoutMin = 10
+	}
+
+	if c.WebPort <= 0 || c.WebPort > 65535 {
+		c.WebPort = defaultWebPort
 	}
 
 	// 通知配置来自旧版本时补齐默认值。
@@ -221,6 +265,10 @@ func defaultAppConfig() *AppConfig {
 		HangTimeoutMin:  10,
 		HangAutoRestart: true,
 		HangInitialized: true,
+
+		WebEnabled:     false,
+		WebPort:        defaultWebPort,
+		WebInitialized: true,
 	}
 }
 

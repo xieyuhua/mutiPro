@@ -203,21 +203,28 @@ type mainWindow struct {
 	actionCrashSound   *walk.Action
 	actionCrashBalloon *walk.Action
 
-	actionLogToFile        *walk.Action
-	actionLogKeep7         *walk.Action
-	actionLogKeep30        *walk.Action
-	actionLogKeep90        *walk.Action
-	actionLogKeepForever   *walk.Action
+	actionWeb         *walk.Action
+	actionWebSettings *walk.Action
 
-	tray       *walk.NotifyIcon
-	trayShow   *walk.Action
-	trayStart  *walk.Action
-	trayStop   *walk.Action
-	trayExit   *walk.Action
+	actionLogToFile      *walk.Action
+	actionLogKeep7       *walk.Action
+	actionLogKeep30      *walk.Action
+	actionLogKeep90      *walk.Action
+	actionLogKeepForever *walk.Action
+
+	tray      *walk.NotifyIcon
+	trayShow  *walk.Action
+	trayStart *walk.Action
+	trayStop  *walk.Action
+	trayExit  *walk.Action
 
 	model   *rowModel
 	runners []*Runner
-	current *Runner
+	// runnersMu 保护 runners 切片本身。
+	// 切片在 UI 线程增删，Web 服务在独立协程读取，
+	// 不加锁会有数据竞争（切片头指针被替换时尤其危险）。
+	runnersMu sync.RWMutex
+	current   *Runner
 
 	exiting       bool
 	trayHintShown bool
@@ -229,6 +236,8 @@ type mainWindow struct {
 	notifier *Notifier
 	// notifySentAt 记录每个「程序+事件」上次成功入队的时间，用于冷却。
 	notifySentAt map[string]time.Time
+	// web 提供局域网管理页面，未启用时为 nil。
+	web *webServer
 }
 
 func main() {
@@ -266,8 +275,10 @@ func main() {
 		os.Exit(1)
 	}
 	w.notifier = newNotifier()
+	w.web = newWebServer(w)
 	w.buildRunners()
 	w.buildTray()
+	w.startWebIfEnabled()
 
 	// 恢复上次的窗口位置（首次启动或无有效记录时保持默认居中）。
 	applyWindowState(w.mw, loadWindowState())
@@ -471,7 +482,7 @@ func (w *mainWindow) buildUI() error {
 	}.Create()
 
 	if err != nil {
-	return err
+		return err
 	}
 
 	w.mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
@@ -621,22 +632,38 @@ func (w *mainWindow) refreshLogWriters() {
 // buildRunners 全量重建。只在启动时使用；编辑/新增/删除必须走增量方法，
 // 否则会把所有正在运行的程序一起杀掉。
 func (w *mainWindow) buildRunners() {
-	for _, r := range w.runners {
+	for _, r := range w.runnersSnapshot() {
 		r.Kill()
 	}
-	w.runners = nil
 
+	built := make([]*Runner, 0, len(w.app.Programs))
 	for _, cfg := range w.app.Programs {
-		w.runners = append(w.runners, w.makeRunner(cfg))
+		built = append(built, w.makeRunner(cfg))
 	}
-	w.model.rebuild(w.runners)
-	if len(w.runners) > 0 {
+
+	w.runnersMu.Lock()
+	w.runners = built
+	w.runnersMu.Unlock()
+
+	w.model.rebuild(built)
+	if len(built) > 0 {
 		_ = w.table.SetCurrentIndex(0)
 	}
 }
 
+// runnersSnapshot 返回当前 Runner 列表的副本，供非 UI 线程安全遍历。
+func (w *mainWindow) runnersSnapshot() []*Runner {
+	w.runnersMu.RLock()
+	defer w.runnersMu.RUnlock()
+	result := make([]*Runner, len(w.runners))
+	copy(result, w.runners)
+	return result
+}
+
 // runnerIndex 返回 Runner 在切片中的位置。
 func (w *mainWindow) runnerIndex(r *Runner) int {
+	w.runnersMu.RLock()
+	defer w.runnersMu.RUnlock()
 	for i, item := range w.runners {
 		if item == r {
 			return i
@@ -655,7 +682,9 @@ func (w *mainWindow) replaceRunner(old *Runner, cfg *ProgramConfig) *Runner {
 	// 日志文件句柄不关闭会一直占用文件，后续清理也会失败。
 	old.CloseLogFile()
 	replacement := w.makeRunner(cfg)
+	w.runnersMu.Lock()
 	w.runners[index] = replacement
+	w.runnersMu.Unlock()
 	w.model.replace(index, replacement)
 	return replacement
 }
@@ -663,7 +692,9 @@ func (w *mainWindow) replaceRunner(old *Runner, cfg *ProgramConfig) *Runner {
 // appendRunner 新增一个程序，已有程序保持原状。
 func (w *mainWindow) appendRunner(cfg *ProgramConfig) *Runner {
 	r := w.makeRunner(cfg)
+	w.runnersMu.Lock()
 	w.runners = append(w.runners, r)
+	w.runnersMu.Unlock()
 	w.model.insert(r)
 	return r
 }
@@ -676,7 +707,9 @@ func (w *mainWindow) removeRunner(target *Runner) {
 	}
 	target.Kill()
 	target.CloseLogFile()
+	w.runnersMu.Lock()
 	w.runners = append(w.runners[:index], w.runners[index+1:]...)
+	w.runnersMu.Unlock()
 	w.model.removeAt(index)
 }
 
@@ -687,6 +720,92 @@ func (w *mainWindow) uiAsync(fn func()) {
 	}
 	defer func() { recover() }()
 	w.mw.Synchronize(fn)
+}
+
+// performWebAction 执行 Web 端请求的动作。
+//
+// 直接操作 Runner（其方法本身线程安全），不依赖 UI 消息循环，
+// 因此 Web 服务可以独立于界面工作。界面刷新通过 uiAsync
+// 异步通知——HTTP 响应不需要等待重绘完成。
+func (w *mainWindow) performWebAction(action, id string) (string, bool) {
+	switch action {
+	case "startAll":
+		for _, runner := range w.runnersSnapshot() {
+			w.startRunnerDirect(runner)
+		}
+		w.refreshUIAsync()
+		return "已启动全部程序", true
+	case "stopAll":
+		for _, runner := range w.runnersSnapshot() {
+			if runner.State() != StateStopped {
+				go runner.Stop()
+			}
+		}
+		w.refreshUIAsync()
+		return "已停止全部程序", true
+	}
+
+	var runner *Runner
+	for _, candidate := range w.runnersSnapshot() {
+		if candidate.Config().ID == id {
+			runner = candidate
+			break
+		}
+	}
+	if runner == nil {
+		return "程序不存在", false
+	}
+
+	switch action {
+	case "start":
+		if runner.IsRunning() {
+			return "程序已在运行", true
+		}
+		if err := w.startRunnerDirect(runner); err != nil {
+			return "启动失败：" + err.Error(), false
+		}
+		return "已启动 " + runner.Config().Name, true
+	case "stop":
+		if !runner.IsRunning() {
+			return "程序未运行", true
+		}
+		go runner.Stop()
+		return "正在停止 " + runner.Config().Name, true
+	case "restart":
+		go func() {
+			if runner.State() != StateStopped {
+				runner.Stop()
+			}
+			runner.MarkHangRestarted()
+			if err := runner.Start(AppDir(), false); err != nil {
+				runner.appendLog("=== 重启失败：" + err.Error())
+			}
+			w.refreshUIAsync()
+		}()
+		return "正在重启 " + runner.Config().Name, true
+	}
+	return "未知操作：" + action, false
+}
+
+// startRunnerDirect 启动程序并返回错误，供 Web 端使用。
+func (w *mainWindow) startRunnerDirect(runner *Runner) error {
+	if runner.IsRunning() {
+		return nil
+	}
+	err := runner.Start(AppDir(), false)
+	w.refreshUIAsync()
+	return err
+}
+
+// refreshUIAsync 请求界面刷新。窗口已关闭时静默忽略。
+func (w *mainWindow) refreshUIAsync() {
+	w.uiAsync(func() {
+		w.model.publishAll()
+		w.updateStatusBar()
+		if w.current != nil {
+			w.refreshDetail()
+		}
+	})
 }
 
 func (w *mainWindow) onRunnerState(r *Runner) {
@@ -773,15 +892,6 @@ func (w *mainWindow) notifyCrash(r *Runner, code int) {
 		message := fmt.Sprintf("退出码 %d，已安排自动重启。", code)
 		_ = w.tray.ShowWarning(title, message)
 	}
-}
-
-func (w *mainWindow) runnerByID(id string) *Runner {
-	for _, r := range w.runners {
-		if r.Config().ID == id {
-			return r
-		}
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------- 选择与详情
@@ -1271,6 +1381,21 @@ func (w *mainWindow) buildMenuItems() []dcl.MenuItem {
 				},
 				dcl.Separator{},
 				dcl.Action{
+					AssignTo:  &w.actionWeb,
+					Text:      "启用 Web 管理",
+					Checkable: true,
+					Checked:   w.app.WebEnabled,
+					OnTriggered: func() {
+						w.toggleWeb(w.actionWeb.Checked())
+					},
+				},
+				dcl.Action{
+					AssignTo:    &w.actionWebSettings,
+					Text:        "Web 管理设置…",
+					OnTriggered: func() { w.openWebSettings() },
+				},
+				dcl.Separator{},
+				dcl.Action{
 					Text:        "打开配置目录",
 					OnTriggered: func() { openConfigFolder() },
 				},
@@ -1425,6 +1550,9 @@ func (w *mainWindow) exitApplication() {
 	}
 	// 退出前记录窗口位置，下次启动时恢复。
 	saveWindowState(w.mw)
+	if w.web != nil {
+		w.web.Stop()
+	}
 
 	for _, r := range w.runners {
 		r.Kill()
@@ -1643,6 +1771,7 @@ func (w *mainWindow) applyAutoStartFromConfig() {
 	w.syncMenuChecks()
 	w.syncCrashMenu()
 	w.syncLogMenu()
+	w.syncWebMenu()
 }
 
 // toggleAutoStart 由菜单项触发。菜单是勾选式的，状态即当前值。
@@ -1978,4 +2107,104 @@ func formatDurationShort(d time.Duration) string {
 		return fmt.Sprintf("%d 小时 %d 分", int(d.Hours()), int(d.Minutes())%60)
 	}
 	return fmt.Sprintf("%d 天 %d 小时", int(d.Hours())/24, int(d.Hours())%24)
+}
+
+// ---------------------------------------------------------------- Web 管理
+
+// startWebIfEnabled 按配置启动 Web 服务。
+//
+// 首次启用时自动生成随机密码并保存——没有密码的局域网管理页面
+// 风险太大，不允许留空。
+func (w *mainWindow) startWebIfEnabled() {
+	if w.web == nil || !w.app.WebEnabled {
+		return
+	}
+	if err := w.web.Start(w.app.WebPort); err != nil {
+		walk.MsgBox(w.mw, "Web 管理启动失败",
+			"端口 "+strconv.Itoa(w.app.WebPort)+" 无法监听：\n"+err.Error()+
+				"\n\n可在「选项 → Web 管理」里换一个端口。",
+			walk.MsgBoxIconWarning)
+	}
+}
+
+// toggleWeb 开关 Web 管理。开启前确保密码已生成。
+func (w *mainWindow) toggleWeb(enabled bool) {
+	if w.web == nil {
+		return
+	}
+	if !enabled {
+		w.web.Stop()
+		w.app.WebEnabled = false
+		w.saveConfig()
+		w.syncWebMenu()
+		return
+	}
+
+	password, generated := w.app.ensureWebPassword()
+	if generated {
+		w.saveConfig()
+	}
+	if err := w.web.Start(w.app.WebPort); err != nil {
+		walk.MsgBox(w.mw, "启动失败",
+			"端口 "+strconv.Itoa(w.app.WebPort)+" 无法监听：\n"+err.Error(),
+			walk.MsgBoxIconError)
+		w.app.WebEnabled = false
+		w.saveConfig()
+		w.syncWebMenu()
+		return
+	}
+	w.app.WebEnabled = true
+	w.saveConfig()
+	w.syncWebMenu()
+
+	if generated {
+		walk.MsgBox(w.mw, "Web 管理已启用",
+			"已生成随机访问密码：\n\n    "+password+
+				"\n\n可用地址：\n"+w.webAccessHint()+
+				"\n\n密码保存在配置文件中，可在菜单里重置。",
+			walk.MsgBoxIconInformation)
+	}
+}
+
+// webAccessHint 列出可访问页面的地址。
+func (w *mainWindow) webAccessHint() string {
+	lines := []string{"    http://127.0.0.1:" + strconv.Itoa(w.app.WebPort) + "/  （本机）"}
+	for _, ip := range LocalAddresses() {
+		lines = append(lines, "    http://"+ip+":"+strconv.Itoa(w.app.WebPort)+"/  （局域网）")
+	}
+	return strings.Join(lines, "\n")
+}
+
+// syncWebMenu 让菜单勾选状态与配置一致。
+func (w *mainWindow) syncWebMenu() {
+	if w.actionWeb != nil {
+		_ = w.actionWeb.SetChecked(w.app.WebEnabled)
+	}
+}
+
+// openWebSettings 打开 Web 管理设置对话框。
+func (w *mainWindow) openWebSettings() {
+	if showWebDialog(w.mw, w.app, w) {
+		w.saveConfig()
+	}
+}
+
+// resetWebPassword 生成新密码并提示用户。
+func (w *mainWindow) resetWebPassword() (string, error) {
+	old := w.app.WebPassword
+	w.app.WebPassword = randomPassword(12)
+	if err := w.app.save(); err != nil {
+		w.app.WebPassword = old
+		return "", err
+	}
+	if w.web != nil {
+		// 密码变更后所有旧会话立即失效。
+		w.web.Stop()
+		if w.app.WebEnabled {
+			if err := w.web.Start(w.app.WebPort); err != nil {
+				return w.app.WebPassword, err
+			}
+		}
+	}
+	return w.app.WebPassword, nil
 }
