@@ -19,20 +19,20 @@ type notifyDialog struct {
 
 	dlg *walk.Dialog
 
-	chkEnabled   *walk.CheckBox
-	cmbPlatform  *walk.ComboBox
-	txtWebhook   *walk.LineEdit
-	txtSecret    *walk.LineEdit
+	chkEnabled      *walk.CheckBox
+	cmbPlatform     *walk.ComboBox
+	txtWebhook      *walk.LineEdit
+	txtSecret       *walk.LineEdit
 	lblPlatformHint *walk.Label
-	chkCrash     *walk.CheckBox
-	chkStartFail *walk.CheckBox
-	chkHung      *walk.CheckBox
-	chkScheduled *walk.CheckBox
-	chkLogTail   *walk.CheckBox
-	numTailLines *walk.NumberEdit
+	chkCrash        *walk.CheckBox
+	chkStartFail    *walk.CheckBox
+	chkHung         *walk.CheckBox
+	chkScheduled    *walk.CheckBox
+	chkLogTail      *walk.CheckBox
+	numTailLines    *walk.NumberEdit
 
-	chkHang      *walk.CheckBox
-	numHangMin   *walk.NumberEdit
+	chkHang        *walk.CheckBox
+	numHangMin     *walk.NumberEdit
 	chkHangRestart *walk.CheckBox
 
 	accepted bool
@@ -212,7 +212,7 @@ func (d *notifyDialog) build(owner walk.Form) error {
 						OnCheckedChanged: func() { d.updateEnabled() },
 					},
 					dcl.Label{
-						Text: "这里只是默认值；每个程序可在「编辑 → 卡死检测」里单独设为启用或关闭。",
+						Text:      "这里只是默认值；每个程序可在「编辑 → 卡死检测」里单独设为启用或关闭。",
 						TextColor: walk.RGB(148, 163, 184),
 					},
 					dcl.Composite{

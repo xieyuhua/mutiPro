@@ -128,8 +128,8 @@ func TestConfigRoundTrip(t *testing.T) {
 		MinimizeToTray:   false,
 		Programs: []*ProgramConfig{{
 			ID: "id1", Name: "测试程序", ExePath: `C:\tools\app.exe`,
-			Arguments: "-k {token}",
-			Args:      []ArgItem{{Key: "token", Value: "中文 & 符号\"引号"}},
+			Arguments:  "-k {token}",
+			Args:       []ArgItem{{Key: "token", Value: "中文 & 符号\"引号"}},
 			RunAsAdmin: true, AutoRestart: true, AutoStart: true,
 			StopTimeout: 8000, RestartDelay: 3000,
 			ProbeEnabled: true, ProbeCommand: "--info", ProbeParser: "Json",

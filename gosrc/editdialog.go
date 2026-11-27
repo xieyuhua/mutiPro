@@ -15,14 +15,14 @@ type editDialog struct {
 	cfg *ProgramConfig
 	dlg *walk.Dialog
 
-	txtName     *walk.LineEdit
-	txtExe      *walk.LineEdit
-	txtWorkDir  *walk.LineEdit
-	txtArgs         *walk.TextEdit
-	txtArgsList     *walk.TextEdit
-	lblArgsPreview  *walk.Label
-	txtStop     *walk.LineEdit
-	numStop     *walk.NumberEdit
+	txtName        *walk.LineEdit
+	txtExe         *walk.LineEdit
+	txtWorkDir     *walk.LineEdit
+	txtArgs        *walk.TextEdit
+	txtArgsList    *walk.TextEdit
+	lblArgsPreview *walk.Label
+	txtStop        *walk.LineEdit
+	numStop        *walk.NumberEdit
 
 	chkAdmin       *walk.CheckBox
 	chkAutoRestart *walk.CheckBox
@@ -347,7 +347,7 @@ func (d *editDialog) build(owner walk.Form) error {
 											dcl.LineEdit{
 												AssignTo:      &d.txtSchedStart,
 												StretchFactor: 1,
-												ToolTipText: "HH:MM（每天）或 cron 表达式，例如 08:30 或 0 8 * * 1-5；留空不启用",
+												ToolTipText:   "HH:MM（每天）或 cron 表达式，例如 08:30 或 0 8 * * 1-5；留空不启用",
 											},
 											dcl.PushButton{
 												Text:      "示例…",
@@ -363,7 +363,7 @@ func (d *editDialog) build(owner walk.Form) error {
 											dcl.LineEdit{
 												AssignTo:      &d.txtSchedStop,
 												StretchFactor: 1,
-												ToolTipText: "HH:MM（每天）或 cron 表达式，例如 23:00 或 0 23 * * *；留空不启用",
+												ToolTipText:   "HH:MM（每天）或 cron 表达式，例如 23:00 或 0 23 * * *；留空不启用",
 											},
 											dcl.PushButton{
 												Text:      "示例…",

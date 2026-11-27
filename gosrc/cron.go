@@ -56,11 +56,11 @@ func ParseCron(expr string) (*CronSpec, error) {
 	}
 
 	spec := &CronSpec{
-		Minute:       sets[0],
-		Hour:         sets[1],
-		DayOfMonth:   sets[2],
-		Month:        sets[3],
-		DayOfWeek:    sets[4],
+		Minute:        sets[0],
+		Hour:          sets[1],
+		DayOfMonth:    sets[2],
+		Month:         sets[3],
+		DayOfWeek:     sets[4],
 		DomRestricted: parts[2] != "*",
 		DowRestricted: parts[4] != "*",
 		Raw:           text,

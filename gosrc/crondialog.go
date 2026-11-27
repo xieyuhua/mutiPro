@@ -24,25 +24,25 @@ func showCronPresetDialog(owner walk.Form, target string) (int, bool) {
 	_ = labels
 
 	err := dcl.Dialog{
-		AssignTo:     &dlg,
-		Title:        "选择 cron 示例（" + target + "）",
-		Icon:         appIcon(),
-		MinSize:      dcl.Size{Width: 620, Height: 460},
-		Size:         dcl.Size{Width: 680, Height: 520},
-		Layout:       dcl.VBox{Spacing: 8},
+		AssignTo: &dlg,
+		Title:    "选择 cron 示例（" + target + "）",
+		Icon:     appIcon(),
+		MinSize:  dcl.Size{Width: 620, Height: 460},
+		Size:     dcl.Size{Width: 680, Height: 520},
+		Layout:   dcl.VBox{Spacing: 8},
 		Children: []dcl.Widget{
 			dcl.Label{
 				Text: "双击一行直接应用；也可以在下方看到表达式的含义。",
 			},
 			dcl.TableView{
-				AssignTo:              &table,
-				Model:                 model,
-				AlternatingRowBG:      true,
-				ColumnsOrderable:      false,
-				MultiSelection:        false,
-				LastColumnStretched:   true,
+				AssignTo:                 &table,
+				Model:                    model,
+				AlternatingRowBG:         true,
+				ColumnsOrderable:         false,
+				MultiSelection:           false,
+				LastColumnStretched:      true,
 				NotSortableByHeaderClick: true,
-				StretchFactor:         1,
+				StretchFactor:            1,
 				Columns: []dcl.TableViewColumn{
 					{Title: "说明", Width: 150},
 					{Title: "表达式", Width: 140},

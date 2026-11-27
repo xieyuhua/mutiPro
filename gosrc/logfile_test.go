@@ -11,13 +11,13 @@ import (
 // TestSanitizeName 验证程序名能安全用作目录名。
 func TestSanitizeName(t *testing.T) {
 	cases := map[string]string{
-		"wb2api":         "wb2api",
-		"运维端口":           "运维端口",
+		"wb2api":              "wb2api",
+		"运维端口":                "运维端口",
 		`a/b\c:d*e?f"g<h>i|j`: "a_b_c_d_e_f_g_h_i_j",
-		"  尾部空格  ":       "尾部空格",
-		"结尾点.":            "结尾点",
-		"":               "未命名",
-		"   ":            "未命名",
+		"  尾部空格  ":            "尾部空格",
+		"结尾点.":                "结尾点",
+		"":                    "未命名",
+		"   ":                 "未命名",
 	}
 	for in, want := range cases {
 		if got := sanitizeName(in); got != want {

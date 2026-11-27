@@ -19,10 +19,10 @@ import (
 type NotifyEvent string
 
 const (
-	EventCrash       NotifyEvent = "crash"        // 运行中异常退出
-	EventStartFailed NotifyEvent = "startFailed"  // 启动后立即失败
-	EventHung        NotifyEvent = "hung"         // 进程存活但无响应
-	EventScheduled   NotifyEvent = "scheduled"    // 定时任务触发
+	EventCrash       NotifyEvent = "crash"       // 运行中异常退出
+	EventStartFailed NotifyEvent = "startFailed" // 启动后立即失败
+	EventHung        NotifyEvent = "hung"        // 进程存活但无响应
+	EventScheduled   NotifyEvent = "scheduled"   // 定时任务触发
 )
 
 func (e NotifyEvent) Label() string {
@@ -42,8 +42,8 @@ func (e NotifyEvent) Label() string {
 
 // 群机器人平台。
 const (
-	RobotWeCom  = "wecom"  // 企业微信群机器人
-	RobotDingTalk = "ding" // 钉钉群机器人
+	RobotWeCom    = "wecom" // 企业微信群机器人
+	RobotDingTalk = "ding"  // 钉钉群机器人
 )
 
 // 企业微信群机器人单条消息有 4096 字节上限，留出余量。
@@ -125,12 +125,12 @@ func (c *NotifyConfig) effectiveWebhook(program *ProgramConfig) string {
 
 // NotifyMessage 是一条待发送的通知。
 type NotifyMessage struct {
-	Event     NotifyEvent
-	Program   string
-	Detail    string
-	LogTail   []string
+	Event      NotifyEvent
+	Program    string
+	Detail     string
+	LogTail    []string
 	OccurredAt time.Time
-	Hostname  string
+	Hostname   string
 }
 
 // buildText 组装最终发送的纯文本内容。

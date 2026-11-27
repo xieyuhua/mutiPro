@@ -97,8 +97,8 @@ type Runner struct {
 	lastSchedStart time.Time
 	lastSchedStop  time.Time
 	// 定时规则解析结果缓存，配置变化时通过 schedCacheKey 失效。
-	startSched   *Schedule
-	stopSched    *Schedule
+	startSched    *Schedule
+	stopSched     *Schedule
 	schedCacheKey string
 
 	OnStateChanged func(*Runner)
